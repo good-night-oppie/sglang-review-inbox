@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from inbox import agent, ci, config as config_module, fixer, github, pipeline as pipeline_module  # noqa: E402
 from inbox.db import Store  # noqa: E402
-from inbox.pipeline import Pipeline, anchored, new_side_ranges  # noqa: E402
+from inbox.pipeline import Pipeline, anchored, evidence_line, new_side_ranges  # noqa: E402
 from inbox.skill import SkillSync, SkillSyncError, missing_skill_steps  # noqa: E402
 from inbox.triage import triage  # noqa: E402
 
@@ -774,18 +774,57 @@ class AutonomousTest(unittest.TestCase):
         self.assertTrue(notes[0].startswith("@someone these jobs still fail on"))
         self.assertIn("Segmentation fault", notes[0])
 
-    def test_failure_without_a_readable_log_never_pings_the_author(self):
+    def test_failure_without_a_readable_log_is_rerun_then_watched_never_pinged(self):
         triage = self.failing_ci("unknown", "(not fetched: over the 20-log cap) No failure log is available.")
         with mock.patch.object(agent, "triage_ci", return_value=(triage, {})), \
                 mock.patch.object(github, "failed_job_log", return_value="..."):
             self.advance()
             self.advance()
-            self.advance()  # one rerun
+            self.advance()  # first rerun
             self.failing_ci("unknown", "(not fetched: over the 20-log cap)", completed="2099-01-01T00:00:00Z")
             card = self.advance()
-        self.assertEqual(self.comments(), ["/rerun-failed-ci"])
+            self.assertEqual(self.comments(), ["/rerun-failed-ci"])  # backing off before the next rerun
+            self.assertEqual(card["stage_reason"], "1 CI failure(s) without a readable log, agent rerunning (1/3)")
+            for n in (2, 3):
+                self.age_actions(4 * 3600)
+                card = self.advance()
+                self.assertEqual(self.comments(), ["/rerun-failed-ci"] * n)
+            self.assertIn("rerunning (3/3)", card["stage_reason"])
+            self.age_actions(4 * 3600)
+            card = self.advance()
+        self.assertEqual(self.comments(), ["/rerun-failed-ci"] * 3)  # never an @author note
         self.assertEqual(card["stage"], "approved")
-        self.assertIn("without a readable log", card["stage_reason"])
+        self.assertIn("without a readable log; the agent keeps watching", card["stage_reason"])
+
+    def test_quoted_log_fetch_failure_is_never_quoted_to_the_author(self):
+        missing = "(log fetch failed: gh run view --repo: log not found: 124328582203)"
+        triage = self.failing_ci("unknown", f'"{missing}"')
+        with mock.patch.object(agent, "triage_ci", return_value=(triage, {})), \
+                mock.patch.object(github, "failed_job_log", return_value="..."):
+            self.advance()
+            self.advance()
+            self.advance()  # one rerun
+            self.failing_ci("unknown", f'"{missing}"', completed="2099-01-01T00:00:00Z")
+            card = self.advance()
+        self.assertEqual(self.comments(), ["/rerun-failed-ci"])  # no @author note quoting the fetch error
+        self.assertIn("without a readable log, agent rerunning", card["stage_reason"])
+
+    def test_related_call_on_a_job_without_a_log_is_not_sent_to_the_author(self):
+        triage = self.failing_ci("related", "AITER decode path changed, so this AMD job likely regressed")
+        missing = "(log fetch failed: gh run view --repo: log not found: 1)"
+        with mock.patch.object(agent, "triage_ci", return_value=(triage, {})), \
+                mock.patch.object(github, "failed_job_log", return_value=missing):
+            self.advance()
+            self.advance()
+            card = self.advance()  # no log read: treated as unattributed, one rerun
+            self.assertEqual(self.comments(), ["/rerun-failed-ci"])
+            self.assertIn("rerunning once", card["stage_reason"])
+            self.failing_ci("related", "AITER decode path changed", completed="2099-01-01T00:00:00Z")
+            card = self.advance()
+            card = self.advance()
+        self.assertEqual(self.comments(), ["/rerun-failed-ci"])  # never an @author note
+        self.assertEqual(card["stage"], "approved")
+        self.assertEqual(self.slack.sent[-1][2].count("CI failures"), 0)
 
     def test_triage_reads_every_matrix_leg(self):
         legs = [dict(check(f"cpu ({i})", conclusion="FAILURE")) for i in range(3)]
@@ -1236,6 +1275,19 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(len(notes), 1)
         self.assertIn("add the test commands and results", notes[0][1])
         self.assertIn("before review, please add the test commands", self.slack.sent[-1][2])
+
+
+class LogPlaceholderTest(unittest.TestCase):
+    def test_placeholders_are_recognised_even_when_quoted(self):
+        for text in ["(log fetch failed: gh run view --repo: log not found: 1)",
+                     '"(log fetch failed: gh run view --repo: log not found: 1)"',
+                     "(not fetched: over the 20-log cap)", "(empty log)", "(log too large, not downloaded within 300 s)",
+                     "(not a GitHub Actions job, no log)"]:
+            self.assertTrue(github.log_missing(text), text)
+            self.assertEqual(evidence_line({"evidence": text}), "", text)
+        self.assertFalse(github.log_missing("E   AssertionError: expected 3 got 4"))
+        self.assertEqual(evidence_line({"evidence": "`AssertionError: expected 3 got 4`"}),
+                         "AssertionError: expected 3 got 4")
 
 
 class SlackIntakeTest(unittest.TestCase):

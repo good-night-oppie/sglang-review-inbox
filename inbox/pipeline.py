@@ -29,8 +29,8 @@ def evidence_line(failure):
     """The first line of triage evidence worth showing an author; empty when
     the agent had no log to read (its placeholders must never be quoted)."""
     for line in (failure.get("evidence") or "").strip().splitlines():
-        line = line.strip().strip("`").strip()
-        if line and not line.startswith("(") and "not fetched" not in line and "no failure log" not in line.lower():
+        line = line.strip().strip("`\"'").strip()
+        if line and not line.startswith("(") and not github.log_missing(line):
             return line
     return ""
 
@@ -1273,15 +1273,24 @@ class Pipeline:
 
     def handle_unknown_failures(self, card, head, failures, sent, now, signature):
         """A failure nobody could attribute gets one fresh run; if it fails
-        again, the author is asked to look. Never parked on you."""
+        again, the author is asked to look, but only with a log line to show.
+        Without a readable log it is rerun like infra (bounded, backing off)
+        and then watched. Never parked on you."""
         key = card["key"]
         family_of = lambda f: "rerun-test" if f["name"].startswith(ci.TARGETED_PREFIX) else "rerun-failed"  # noqa: E731
-        todo, waiting, again = set(), False, []
+        todo, waiting, again, no_log_retry = set(), False, [], 0
         for failure in failures:
             attempts = sent[family_of(failure)]
             finished = epoch(failure.get("completed_at") or "")
-            if any(a["ts"] < finished for a in attempts) or len(attempts) >= self.RETRY_LIMIT:
+            failed_again = any(a["ts"] < finished for a in attempts)
+            if len(attempts) >= self.RETRY_LIMIT or (failed_again and evidence_line(failure)):
                 again.append(failure)  # it already failed after a rerun
+            elif failed_again:  # no log to go on: rerun again rather than ask the author
+                no_log_retry = max(no_log_retry, len(attempts))
+                if self.retry_due(attempts, now):
+                    todo.add(family_of(failure))
+                else:
+                    waiting = True
             elif attempts and now - attempts[-1]["ts"] < self.RERUN_TIMEOUT:
                 waiting = True
             else:
@@ -1294,7 +1303,11 @@ class Pipeline:
                 "/rerun-test " + " ".join(review.get("targeted_tests") or [])
             self.send_ci(card, head, family, command, "unattributed failure: one fresh run first", sent[family])
         readable = [f for f in again if evidence_line(f)]
-        if todo or waiting:
+        if no_log_retry and (todo or waiting):
+            done = no_log_retry + (1 if todo else 0)
+            self.store.set_stage(key, "approved", f"{len(failures)} CI failure(s) without a readable log, "
+                                 f"agent rerunning ({done}/{self.RETRY_LIMIT})")
+        elif todo or waiting:
             self.store.set_stage(key, "approved", f"{len(failures)} unattributed CI failure(s), rerunning once")
         elif not readable:  # nothing concrete to show the author; don't guess at them
             self.store.set_stage(key, "approved", f"{len(again)} CI failure(s) without a readable log; "
@@ -1468,7 +1481,9 @@ class Pipeline:
         finally:
             workspace.cleanup()
         card = self.store.get_pr(key)
-        record = dict(result, signature=ci.signature(failures), head=head, at=time.time())
+        # Jobs whose log could not be read: nothing in them may be quoted to the author.
+        no_log = sorted(f["name"] for f in with_logs if github.log_missing(f["log_tail"]))
+        record = dict(result, signature=ci.signature(failures), head=head, at=time.time(), no_log=no_log)
         self.store.update_pr(key, ci=dict(card["ci"] or {}, triage=record))
         self.store.add_event(key, "ci", f"CI triage: {result['summary']}", {"seconds": info.get("seconds")})
 

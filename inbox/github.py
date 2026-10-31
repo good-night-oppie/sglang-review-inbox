@@ -119,6 +119,16 @@ def summarize_checks(rollup):
             "total": sum(counts.values())}
 
 
+LOG_MISSING = re.compile(r"\(?(not a GitHub Actions job|log too large|log fetch failed|empty log|not fetched)\b"
+                         r"|log not found|no failure log", re.I)
+
+
+def log_missing(text):
+    """True for the notes failed_job_log returns instead of a log, wherever
+    they appear (an agent may quote them back)."""
+    return bool(LOG_MISSING.search(text or "")) and len((text or "").strip().splitlines()) <= 2
+
+
 def failed_job_log(url, max_lines=250):
     """Tail of a failed Actions job log, or a short note saying why there is none."""
     match = JOB_URL.search(url or "")

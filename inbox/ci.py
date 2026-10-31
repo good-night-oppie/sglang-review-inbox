@@ -119,13 +119,18 @@ def assess(card, snapshot, ci_triage=None, extra_failures=(), exhausted=(), waiv
     blocking, unrelated, retryable = [], [], []
     sig = signature(failures)
     if status == "failed":
-        classified = {}
+        classified, no_log = {}, set()
         if ci_triage and ci_triage.get("signature") == sig:
             classified = {f["name"]: f for f in ci_triage.get("failures", [])}
+            no_log = set(ci_triage.get("no_log") or [])
         for failure in failures:
             verdict = classified.get(failure["name"], {}).get("classification", "unclassified")
-            failure = dict(failure, classification=verdict,
-                           evidence=classified.get(failure["name"], {}).get("evidence", ""))
+            evidence = classified.get(failure["name"], {}).get("evidence", "")
+            if failure["name"] in no_log:
+                # No log was read: a "related" call is a guess, and there is nothing to quote.
+                verdict = "unclassified" if verdict == "related" else verdict
+                evidence = ""
+            failure = dict(failure, classification=verdict, evidence=evidence)
             if any(name and name in failure["name"] for name in waived):
                 unrelated.append(dict(failure, classification="unrelated, the author explained it"))
                 continue

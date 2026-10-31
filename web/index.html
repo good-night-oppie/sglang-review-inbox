@@ -380,6 +380,7 @@ const ZH_RULES = [
   [/CI still failing after a rerun \((.+?)\); author pinged/g, "重跑后 CI 仍失败（$1），已 @ 作者"],
   [/(\d+) unattributed CI failure\(s\), rerunning once/g, "$1 个原因不明的 CI 失败，先重跑一次"],
   [/(\d+) CI failure\(s\) without a readable log; the agent keeps watching/g, "$1 个 CI 失败拿不到日志，agent 继续盯着"],
+  [/(\d+) CI failure\(s\) without a readable log, agent rerunning \((\d+)\/(\d+)\)/g, "$1 个 CI 失败拿不到日志，agent 重跑中（$2/$3）"],
   [/fork CI runs wait for approval and the PR edits \.github\/; approve them yourself/g, "fork 的 CI 在等批准，且 PR 改了 .github/，需要你亲自批准"],
   [/CI running \((\d+) passed, (\d+) failed, (\d+) pending\)/g, "CI 运行中（通过 $1，失败 $2，进行中 $3）"],
   [/, approved (\d+) held run\(s\)/g, "，已批准 $1 个挂起的 run"],

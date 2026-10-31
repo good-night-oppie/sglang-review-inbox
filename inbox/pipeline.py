@@ -739,13 +739,13 @@ class Pipeline:
         if (card["review_head"] != head or not card["review"]) and self.carry_over(card, snap):
             card = self.store.get_pr(key)  # only main merged in: the review still stands
         if card["review_head"] != head or not card["review"]:
+            wait = self.agent_gate(card)  # the window and the token cap first: they say when it runs
+            if wait:
+                self.store.set_stage(key, "queued", wait)
+                return
             used = self.store.count_events("review", time.time() - 86400)
             if used >= self.config["agent"]["daily_review_limit"]:
                 self.store.set_stage(key, "queued", f"daily agent-review budget used ({used}/24h), queued")
-                return
-            wait = self.agent_gate(card)
-            if wait:
-                self.store.set_stage(key, "queued", wait)
                 return
             self.store.set_stage(key, "queued", f"waiting for agent review ({result['tier']})")
             self.submit(key, self.job_review, key, snap, result["tier"], self.delta_base(card))

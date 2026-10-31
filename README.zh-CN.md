@@ -157,7 +157,8 @@ macOS 可以用 launchd 开机自启，Linux 可以用 systemd 用户服务。�
 | `agent.max_concurrent`、`agent.daily_review_limit` | agent 并发数，以及 24 小时内最多 review 多少次。 |
 | `agent.review_skill` | review skill 所在的 git 仓库、分支和目录，每 10 分钟同步一次。没按 skill 做的 review 会被作废重跑。 |
 | `policy.auto_*` | 每一类自动写操作一个开关：CI 命令、发出问题、给作者留言、回复讨论、approve、合并、代修。 |
-| `policy.max_*_per_day`、`max_agent_fixes_per_pr` | 各类操作的上限。 |
+| `policy.max_*_per_day`、`max_agent_fixes_per_pr` | 各类操作的上限。合并上限只算 agent 自己合的；正在跑的代修也计入代修上限。 |
+| `policy.min_merge_interval_minutes`、`policy.min_fix_interval_minutes` | 节奏：两次自动合并至少间隔这么久（默认 60 分钟）；代修一次只跑一个，两次推送至少间隔这么久（默认 15 分钟）。排队等空档的 PR 仍由 agent 处理，不会转给作者。 |
 | `policy.slack_*` | 是否以及怎样回复 Slack 线程；回复以 `slack_prefix` 开头。 |
 | `refresh_seconds` | 进行中的 PR、等作者的 PR 分别多久检查一次。 |
 | `server.host`、`server.port` | 默认 `127.0.0.1:8765`，请只监听本机。 |

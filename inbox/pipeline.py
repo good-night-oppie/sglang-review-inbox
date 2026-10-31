@@ -1090,8 +1090,16 @@ class Pipeline:
                 or any(self.MERGE_HOLD.search(label) for label in labels):
             self.store.set_stage(key, "approved", "ready to merge; held by a WIP / do-not-merge marker")
             return "waiting"
-        if self.store.count_events("merge", time.time() - 86400) >= self.policy["max_auto_merges_per_day"]:
+        now = time.time()
+        if self.store.count_events("merge", now - 86400, prefix="agent merged") \
+                >= self.policy["max_auto_merges_per_day"]:
             self.store.set_stage(key, "approved", "ready to merge; daily auto-merge budget used")
+            return "waiting"
+        next_slot = self.store.last_event_ts("merge", prefix="agent merged") \
+            + 60 * self.policy["min_merge_interval_minutes"]
+        if now < next_slot:  # one auto-merge at a time into main, spaced out
+            self.store.set_stage(key, "approved", "ready to merge; next auto-merge slot at "
+                                 + time.strftime("%H:%M", time.localtime(next_slot)))
             return "waiting"
         failure = card["decision"].get("merge_failure") or {}
         if failure.get("head") == head and \
@@ -1142,8 +1150,10 @@ class Pipeline:
 
     def try_fix(self, card, snap, kind, issues=()):
         """Fix it instead of waiting on the author. False when the policy, a
-        cap, your hand-off to the author or an earlier attempt on this head
-        says no; the caller then asks the author as before."""
+        cap, your hand-off to the author, an earlier attempt on this head or a
+        branch closed to maintainer edits says no; the caller then asks the
+        author as before. True when a fix runs or waits for its slot: one fix at
+        a time, pushes spaced out."""
         if not (is_live(self.config) and self.policy["auto_fix"]):
             return False
         key, head = card["key"], snap["headRefOid"]
@@ -1157,8 +1167,24 @@ class Pipeline:
         if sum(1 for a in actions if a["event"].startswith("fix:") and (a["result"] or {}).get("pushed")) \
                 >= self.policy["max_agent_fixes_per_pr"]:
             return False
-        if self.store.count_events("fix", time.time() - 86400) >= self.policy["max_agent_fixes_per_day"]:
+        running = sum(1 for job in self.inflight.values() if job == "job_fix")
+        now = time.time()
+        if self.store.count_events("fix", now - 86400) + running >= self.policy["max_agent_fixes_per_day"]:
             return False
+        if not github.push_target(card["repo"], card["number"]):
+            # Checked before taking a slot: nothing to try on this head.
+            if self.store.claim_action(key, head, f"fix:{kind}"):
+                self.store.finish_action(key, head, f"fix:{kind}", True, {
+                    "pushed": False, "reason": "the author does not allow edits from maintainers"})
+                self.store.add_event(key, "decision", "agent can't push to this branch (maintainer edits are off); "
+                                     "asking the author")
+            return False
+        next_slot = self.store.last_event_ts("fix", prefix="agent pushed") \
+            + 60 * self.policy["min_fix_interval_minutes"]
+        if running or now < next_slot:
+            when = "after the running fix" if running else time.strftime("%H:%M", time.localtime(next_slot))
+            self.store.set_stage(key, "queued", f"agent will {self.FIX_TASKS[kind]}; next fix slot {when}")
+            return True
         self.store.set_stage(key, "reviewing", f"agent is trying to {self.FIX_TASKS[kind]}")
         self.submit(key, self.job_fix, key, snap, kind, list(issues))
         return True

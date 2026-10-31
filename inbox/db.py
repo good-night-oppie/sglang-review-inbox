@@ -240,11 +240,20 @@ class Store:
             )
             self.conn.commit()
 
-    def count_events(self, kind, since):
+    def count_events(self, kind, since, prefix=""):
         with self.lock:
             row = self.conn.execute(
-                "SELECT COUNT(*) FROM events WHERE kind=? AND ts>=?", (kind, since)).fetchone()
+                "SELECT COUNT(*) FROM events WHERE kind=? AND ts>=? AND substr(message, 1, ?)=?",
+                (kind, since, len(prefix), prefix)).fetchone()
         return row[0]
+
+    def last_event_ts(self, kind, prefix=""):
+        """When the latest `kind` event whose message starts with `prefix` happened, or 0."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT MAX(ts) FROM events WHERE kind=? AND substr(message, 1, ?)=?",
+                (kind, len(prefix), prefix)).fetchone()
+        return row[0] or 0
 
     def events(self, key, limit=200):
         with self.lock:

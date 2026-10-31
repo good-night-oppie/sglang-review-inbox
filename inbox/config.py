@@ -119,10 +119,14 @@ DEFAULTS = {
         "auto_discuss": False,
         "max_agent_fixes_per_pr": 2,
         "max_agent_fixes_per_day": 20,
+        # One fix runs at a time, and pushes are at least this far apart.
+        "min_fix_interval_minutes": 15,
         # Squash-merge PRs that meet the merge bar (approved, CI passed on the
         # current head, GitHub review decision APPROVED, no WIP marker).
         "auto_merge": False,
-        "max_auto_merges_per_day": 30,
+        "max_auto_merges_per_day": 10,
+        # Auto-merges land in main at least this far apart.
+        "min_merge_interval_minutes": 60,
         # Tell the author on GitHub why a PR is stuck (no test plan, related
         # CI failure), once per head.
         "auto_author_notes": False,

@@ -92,10 +92,12 @@
     ],
     "max_auto_approvals_per_day": 30,
     "auto_merge": false,
-    "max_auto_merges_per_day": 30,
+    "max_auto_merges_per_day": 10,
+    "min_merge_interval_minutes": 60,
     "auto_fix": false,
     "max_agent_fixes_per_pr": 2,
     "max_agent_fixes_per_day": 20,
+    "min_fix_interval_minutes": 15,
     "slack_report": true,
     "slack_prefix": "[{login} Review Agent] ",
     "slack_outcomes": [

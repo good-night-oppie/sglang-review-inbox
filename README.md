@@ -170,7 +170,8 @@ Everything has a default in [`inbox/config.py`](inbox/config.py); `config.json` 
 | `agent.max_concurrent`, `agent.daily_review_limit` | Parallel agent jobs and reviews per 24 h. |
 | `agent.review_skill` | Git repo, branch and folder of the review skill, synced every 10 minutes. A review that skips the skill is rejected. |
 | `policy.auto_*` | One switch per kind of autonomous write: CI commands, posting findings, author notes, answering replies, approving, merging, pushing fixes. |
-| `policy.max_*_per_day`, `max_agent_fixes_per_pr` | Caps. |
+| `policy.max_*_per_day`, `max_agent_fixes_per_pr` | Caps. The merge cap counts only the agent's own merges; running fixes count against the fix cap. |
+| `policy.min_merge_interval_minutes`, `policy.min_fix_interval_minutes` | Spacing: auto-merges land at least this far apart (default 60), and fixes run one at a time with pushes at least this far apart (default 15). A PR waiting for its slot stays with the agent. |
 | `policy.slack_*` | Whether and how to answer Slack threads; replies start with `slack_prefix`. |
 | `refresh_seconds` | How often active PRs and PRs waiting on the author are re-checked. |
 | `server.host`, `server.port` | Defaults `127.0.0.1:8765`. Keep it on localhost. |

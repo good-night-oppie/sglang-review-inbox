@@ -433,7 +433,9 @@ class AutonomousTest(unittest.TestCase):
         self.approved = set()
         self.rerun = {"state": "missing", "url": "", "runs": []}
         self.held, self.targeted_jobs, self.discussion = [], [], []
+        self.push_target = {"url": "https://github.com/someone/sglang.git", "branch": "b", "fork": "someone/sglang"}
         patches = [
+            mock.patch.object(github, "push_target", side_effect=lambda *a: self.push_target),
             mock.patch.object(github, "discussion", side_effect=lambda *a: list(self.discussion)),
             mock.patch.object(github, "reply_in_thread",
                               side_effect=lambda r, n, cid, body: self.writes.append(("reply", cid, body)) or "u"),
@@ -561,6 +563,41 @@ class AutonomousTest(unittest.TestCase):
         self.assertNotIn(("merge",), self.writes)
         self.assertTrue(card["decision"]["merge_ready"])  # left on Ready to merge for you
         self.assertIn("do-not-merge", card["stage_reason"])
+
+    def add_event_ago(self, kind, message, seconds, key="sgl-project/sglang#1"):
+        self.store.add_event(key, kind, message)
+        self.store.conn.execute("UPDATE events SET ts = ts - ? WHERE id = (SELECT MAX(id) FROM events)", (seconds,))
+        self.store.conn.commit()
+
+    def test_auto_merges_are_spaced_out(self):
+        self.config["policy"]["auto_merge"] = True
+        self.add_event_ago("merge", "you merged aaaaaaaa", 60)  # your own merge does not hold the agent back
+        self.add_event_ago("merge", "agent merged bbbbbbbb", 20 * 60)
+        self.advance()
+        self.advance()
+        self.snap = dict(self.snap, reviewDecision="APPROVED")
+        card = self.advance()
+        self.assertNotIn(("merge",), self.writes)
+        self.assertEqual(card["stage"], "approved")
+        self.assertIn("next auto-merge slot at", card["stage_reason"])
+        self.assertTrue(card["decision"]["merge_ready"])
+        self.store.conn.execute("UPDATE events SET ts = ts - 3600 WHERE kind = 'merge'")
+        self.store.conn.commit()
+        card = self.advance()
+        self.assertEqual(self.writes.count(("merge",)), 1)
+        self.assertEqual(card["stage_reason"], "merged")
+
+    def test_daily_auto_merge_cap_counts_only_agent_merges(self):
+        self.config["policy"].update(auto_merge=True, max_auto_merges_per_day=2)
+        for hours in (3, 5):
+            self.add_event_ago("merge", "agent merged cccccccc", hours * 3600)
+        self.add_event_ago("merge", "you merged dddddddd", 2 * 3600)
+        self.advance()
+        self.advance()
+        self.snap = dict(self.snap, reviewDecision="APPROVED")
+        card = self.advance()
+        self.assertNotIn(("merge",), self.writes)
+        self.assertIn("daily auto-merge budget used", card["stage_reason"])
 
     def test_failed_auto_merge_backs_off_and_stays_ready(self):
         self.config["policy"]["auto_merge"] = True
@@ -1039,6 +1076,54 @@ class AutonomousTest(unittest.TestCase):
             self.store.finish_action(self.key, f"old{i}", "fix:findings", True, {"pushed": True})
         self.advance()
         self.assertEqual(runs, [])  # two agent pushes on this PR already
+
+    def test_agent_fixes_run_one_at_a_time_and_pushes_are_spaced_out(self):
+        self.config["policy"]["auto_fix"] = True
+        self.blocker()
+        runs = []
+        self.pipe.run_fix = lambda card, snap, kind, issues: runs.append(kind) or {
+            "pushed": True, "head": "f" * 40, "summary": "guard the empty batch", "fixed": ["F1"], "skipped": []}
+        self.advance()
+        self.pipe.inflight["sgl-project/sglang#2"] = "job_fix"
+        card = self.advance()
+        self.assertEqual(runs, [])
+        self.assertEqual(card["stage"], "queued")  # waiting for its slot, not handed to the author
+        self.assertTrue(card["stage_reason"].endswith("next fix slot after the running fix"))
+        self.assertNotIn("COMMENT", [w[0] for w in self.writes])
+        del self.pipe.inflight["sgl-project/sglang#2"]
+        self.add_event_ago("fix", "agent could not fix the CI failures caused by this change: x", 60)
+        self.add_event_ago("fix", "agent pushed 12345678: something", 5 * 60)
+        card = self.advance()
+        self.assertEqual(runs, [])
+        self.assertIn("next fix slot", card["stage_reason"])
+        self.store.conn.execute("UPDATE events SET ts = ts - 900 WHERE kind = 'fix'")
+        self.store.conn.commit()
+        self.advance()
+        self.assertEqual(runs, ["findings"])
+
+    def test_running_fixes_count_against_the_daily_fix_cap(self):
+        self.config["policy"].update(auto_fix=True, max_agent_fixes_per_day=1)
+        self.blocker()
+        self.pipe.run_fix = lambda *a: self.fail("over the daily cap")
+        self.advance()
+        self.pipe.inflight["sgl-project/sglang#2"] = "job_fix"
+        card = self.advance()
+        self.assertEqual(card["stage"], "needs_author")  # cap used by the running fix: the author is asked
+        self.assertEqual(self.writes[0][0], "COMMENT")
+
+    def test_branch_closed_to_maintainer_edits_goes_to_the_author_without_using_a_slot(self):
+        self.config["policy"]["auto_fix"] = True
+        self.push_target = None
+        self.blocker()
+        self.pipe.run_fix = lambda *a: self.fail("cannot push to this branch")
+        self.advance()
+        card = self.advance()
+        self.assertEqual(card["stage"], "needs_author")
+        self.assertEqual(self.writes[0][0], "COMMENT")
+        self.assertEqual(self.store.count_events("fix", 0), 0)
+        self.assertTrue(any("maintainer edits are off" in e["message"] for e in self.store.events(self.key)))
+        self.advance()
+        self.assertEqual(sum(w[0] == "COMMENT" for w in self.writes), 1)
 
     def test_agent_resolves_conflicts_on_an_approved_pr(self):
         self.config["policy"]["auto_fix"] = True

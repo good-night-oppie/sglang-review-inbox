@@ -1,0 +1,911 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SGLang Review Inbox</title>
+<link rel="icon" href="/assets/sgl-mark.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* SGLang brand: orange #D55816, rust #A5300F, peach #F9E6DB/#F2CFBE/#FADDCD, cream #FBF6F1, ink #1F1410 */
+:root {
+  --canvas: #FBF6F1; --surface: #FFFFFF; --surface-2: #FDF8F4; --line: #EEE1D6; --line-strong: #E2CDBE;
+  --ink: #1F1410; --ink-2: #4A372D; --muted: #8A7366;
+  --accent: #D55816; --accent-ink: #FFFFFF; --accent-soft: #FADDCD; --rust: #A5300F;
+  --peach: #F9E6DB; --peach-2: #F2CFBE;
+  --ok: #2E7D4F; --ok-soft: #E3F1E8; --warn: #A86A12; --warn-soft: #FBEFD9; --bad: #B42318; --bad-soft: #FBE4E1;
+  --code: #2A1D17; --code-ink: #F6E9DF;
+  --shadow: 0 1px 2px rgba(31, 20, 16, .05), 0 4px 16px rgba(31, 20, 16, .05);
+  --radius: 12px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --canvas: #15100D; --surface: #1E1714; --surface-2: #241B17; --line: #33271F; --line-strong: #46352A;
+    --ink: #F7EDE5; --ink-2: #DCC8BA; --muted: #A68D7E;
+    --accent: #EC6E2E; --accent-ink: #1A0F0A; --accent-soft: #3D2216; --rust: #F08A5C;
+    --peach: #2D1F18; --peach-2: #3A281E;
+    --ok: #5CC489; --ok-soft: #173123; --warn: #E2AE52; --warn-soft: #33270F; --bad: #F2796C; --bad-soft: #3A1714;
+    --code: #0F0B09; --code-ink: #F2E4D9;
+    --shadow: none; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --canvas: #15100D; --surface: #1E1714; --surface-2: #241B17; --line: #33271F; --line-strong: #46352A;
+  --ink: #F7EDE5; --ink-2: #DCC8BA; --muted: #A68D7E;
+  --accent: #EC6E2E; --accent-ink: #1A0F0A; --accent-soft: #3D2216; --rust: #F08A5C;
+  --peach: #2D1F18; --peach-2: #3A281E;
+  --ok: #5CC489; --ok-soft: #173123; --warn: #E2AE52; --warn-soft: #33270F; --bad: #F2796C; --bad-soft: #3A1714;
+  --code: #0F0B09; --code-ink: #F2E4D9;
+  --shadow: none; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--canvas); color: var(--ink); font: 14px/1.55 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased; }
+code, .mono { font-family: "JetBrains Mono", ui-monospace, Menlo, monospace; font-size: 12.5px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button { font: inherit; font-weight: 500; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink);
+  padding: 6px 12px; border-radius: 8px; cursor: pointer; transition: border-color .15s, background .15s; white-space: nowrap; }
+button:hover { border-color: var(--accent); }
+button:focus-visible, input:focus-visible, .tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+button.primary:hover { background: var(--rust); border-color: var(--rust); color: #fff; }
+button.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+button.ghost:hover { color: var(--ink); border-color: var(--line-strong); }
+button.danger { color: var(--bad); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+input { font: inherit; padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface);
+  color: var(--ink); min-width: 0; }
+input::placeholder { color: var(--muted); }
+
+/* top bar */
+.topbar { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--canvas) 88%, transparent);
+  backdrop-filter: saturate(1.4) blur(10px); border-bottom: 1px solid var(--line); }
+.topbar-inner { max-width: 1240px; margin: 0 auto; padding: 12px 20px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.brand { display: flex; align-items: center; gap: 12px; margin-right: 6px; }
+.brand img { height: 30px; display: block; }
+.brand .title { font-weight: 700; font-size: 16px; letter-spacing: -.01em; }
+.brand .sub { color: var(--muted); font-size: 12px; margin-top: -2px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px;
+  font-weight: 500; background: var(--peach); color: var(--ink-2); white-space: nowrap; border: 1px solid transparent; }
+.pill.live { background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+.pill.shadow { background: var(--surface); border-color: var(--line-strong); cursor: pointer; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); display: inline-block; }
+.dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); } .dot.off { background: var(--line-strong); }
+.spacer { flex: 1; }
+.statusline { display: flex; align-items: center; gap: 10px; margin: 0 2px 14px; flex-wrap: wrap; }
+.statusline .label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+.add { display: flex; gap: 6px; }
+.add input { width: 210px; }
+
+/* layout */
+main { max-width: 1240px; margin: 0 auto; padding: 20px; }
+.tiles { display: grid; grid-template-columns: repeat(var(--tiles, 7), minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; cursor: pointer;
+  box-shadow: var(--shadow); text-align: left; transition: border-color .15s, transform .15s; }
+.tile:hover { border-color: var(--line-strong); transform: translateY(-1px); }
+.tile .n { font-size: 26px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.tile .l { color: var(--muted); font-size: 12px; font-weight: 500; margin-top: 2px; }
+.tile.active { border-color: var(--accent); background: linear-gradient(180deg, var(--accent-soft), var(--surface) 70%); }
+.tile.active .n { color: var(--accent); }
+.tile.hot .n { color: var(--accent); }
+.section-head { display: flex; align-items: baseline; gap: 10px; margin: 4px 2px 10px; }
+.section-head h2 { font-size: 15px; margin: 0; }
+.section-head .hint { color: var(--muted); font-size: 12.5px; }
+.list { display: flex; flex-direction: column; gap: 8px; }
+.row { position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px 12px 18px;
+  display: flex; gap: 14px; align-items: center; cursor: pointer; box-shadow: var(--shadow); transition: border-color .15s; overflow: hidden; }
+.row:hover { border-color: var(--line-strong); }
+.row::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--rail, var(--line-strong)); }
+.row .main { flex: 1; min-width: 0; }
+.row .title { font-weight: 600; overflow-wrap: anywhere; }
+.row .why { color: var(--ink-2); font-size: 13px; margin-top: 3px; }
+.meta { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-top: 4px; }
+.chip { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 500;
+  background: var(--peach); color: var(--ink-2); white-space: nowrap; }
+.chip.ok { background: var(--ok-soft); color: var(--ok); } .chip.warn { background: var(--warn-soft); color: var(--warn); }
+.chip.bad { background: var(--bad-soft); color: var(--bad); } .chip.accent { background: var(--accent-soft); color: var(--rust); }
+.chip.outline { background: transparent; border: 1px solid var(--line-strong); }
+.cibar { display: inline-flex; height: 6px; width: 72px; border-radius: 3px; overflow: hidden; background: var(--line); vertical-align: middle; }
+.cibar span { display: block; height: 100%; }
+.empty { text-align: center; color: var(--muted); padding: 48px 20px; background: var(--surface); border: 1px dashed var(--line-strong);
+  border-radius: var(--radius); }
+.empty b { display: block; color: var(--ink); font-size: 15px; margin-bottom: 4px; }
+.group { margin: 18px 0 8px; display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; color: var(--ink-2); }
+.group .count { color: var(--muted); font-weight: 500; }
+details > summary { cursor: pointer; color: var(--muted); font-weight: 500; margin: 14px 2px 8px; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow); }
+
+/* drawer */
+#scrim { position: fixed; inset: 0; background: rgba(21, 16, 13, .28); opacity: 0; pointer-events: none; transition: opacity .18s; z-index: 9; }
+#scrim.open { opacity: 1; pointer-events: auto; }
+#drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(820px, 100%); background: var(--canvas); border-left: 1px solid var(--line);
+  overflow-y: auto; transform: translateX(104%); transition: transform .2s ease; z-index: 10; }
+#drawer.open { transform: none; }
+.dhead { position: sticky; top: 0; z-index: 2; background: var(--canvas); border-bottom: 1px solid var(--line); padding: 16px 22px 12px; }
+.dhead h1 { font-size: 18px; line-height: 1.35; margin: 6px 0 6px; overflow-wrap: anywhere; letter-spacing: -.01em; }
+.dbody { padding: 16px 22px 40px; display: flex; flex-direction: column; gap: 14px; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.status { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 10px; background: var(--peach); color: var(--ink); font-size: 13px; margin-top: 10px; }
+.status b { color: var(--rust); white-space: nowrap; }
+.card h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.kv { display: grid; grid-template-columns: 140px 1fr; gap: 6px 12px; font-size: 13px; }
+.kv .k { color: var(--muted); }
+.finding { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--surface-2); }
+.finding + .finding { margin-top: 8px; }
+.finding .head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-weight: 600; }
+.finding .path { color: var(--muted); margin: 4px 0 6px; }
+.finding .comment { background: var(--code); color: var(--code-ink); border-radius: 8px; padding: 10px 12px; margin-top: 8px; white-space: pre-wrap; }
+.finding p { margin: 4px 0; font-size: 13px; }
+.cmd { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+.cmd:first-of-type { border-top: 0; }
+.cmd code { background: var(--peach); padding: 2px 8px; border-radius: 6px; overflow-wrap: anywhere; }
+.mermaid-wrap { overflow-x: auto; background: var(--surface); border-radius: 10px; padding: 8px; }
+.timeline { list-style: none; margin: 0; padding: 0; }
+.timeline li { position: relative; padding: 0 0 10px 18px; font-size: 12.5px; color: var(--ink-2); }
+.timeline li::before { content: ""; position: absolute; left: 4px; top: 7px; width: 6px; height: 6px; border-radius: 50%; background: var(--line-strong); }
+.timeline li.action::before { background: var(--accent); }
+.timeline li.error::before { background: var(--bad); }
+.timeline li.merge::before { background: var(--ok); }
+.timeline .t { color: var(--muted); margin-right: 6px; }
+#slack-panel { max-width: 1240px; margin: 14px auto 0; padding: 0 20px; display: none; }
+.seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 5px 10px; background: var(--surface); color: var(--muted); }
+.seg button.on { background: var(--accent); color: var(--accent-ink); }
+.notes { margin-top: 4px; font-size: 12px; color: var(--muted); }
+#toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--canvas);
+  padding: 9px 16px; border-radius: 10px; display: none; z-index: 20; max-width: 90%; font-weight: 500; box-shadow: var(--shadow); }
+@media (max-width: 1100px) { .tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 720px) {
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .add input { width: 100%; } .add { flex: 1 1 100%; }
+  .row { flex-direction: column; align-items: stretch; }
+  .kv { grid-template-columns: 1fr; }
+  main, .topbar-inner { padding-left: 16px; padding-right: 16px; }
+}
+</style>
+</head>
+<body>
+<div class="topbar"><div class="topbar-inner">
+  <div class="brand">
+    <img src="/assets/sgl-wordmark.png" alt="SGLang">
+    <div><div class="title">Review Inbox</div><div class="sub" id="who"></div></div>
+  </div>
+  <span id="mode" class="pill" role="button" tabindex="0"></span>
+  <span class="spacer"></span>
+  <div class="add"><input id="add-url"><button id="add-btn" data-i18n="add"></button></div>
+  <button id="poll-btn" class="ghost" data-i18n="refresh"></button>
+  <button id="slack-btn" class="ghost" data-i18n="connectSlack"></button>
+  <div class="seg" role="group" aria-label="Language">
+    <button id="lang-en" data-lang="en">EN</button><button id="lang-zh" data-lang="zh">中文</button>
+  </div>
+</div></div>
+<div id="slack-panel"><div class="panel">
+  <div style="font-weight:600;margin-bottom:4px" data-i18n="slackPanelTitle"></div>
+  <div class="meta" style="margin-top:0" id="slack-panel-help"></div>
+  <div class="actions" style="margin-top:10px">
+    <input id="slack-token" type="password" autocomplete="off" placeholder="xoxp-..." size="42">
+    <button id="slack-save" class="primary" data-i18n="slackSave"></button>
+    <span id="slack-status" class="meta" style="margin-top:0"></span>
+  </div>
+</div></div>
+<main>
+  <div class="statusline"><span class="label" data-i18n="sources"></span><span id="sources" class="meta" style="margin:0"></span></div>
+  <div class="tiles" id="tiles"></div>
+  <div class="section-head"><h2 id="list-title"></h2><span class="hint" id="list-hint"></span></div>
+  <div class="list" id="list"></div>
+</main>
+<div id="scrim"></div>
+<aside id="drawer" aria-label="PR details"></aside>
+<div id="toast" role="status"></div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script>
+const TOKEN = "__INBOX_TOKEN__";
+
+// ---- i18n: UI strings in both languages; agent-written review text stays English ----
+const I18N = {
+  en: {
+    add: "Add", refresh: "Refresh", refreshTitle: "Poll Slack and GitHub now", connectSlack: "Connect Slack",
+    addPlaceholder: "Paste a PR or Slack message link", sources: "Sources",
+    slackPanelTitle: "Connect a Slack workspace",
+    slackPanelHelp: "Paste the User OAuth Token (starts with xoxp-) from your Slack app's OAuth & Permissions page. It is checked with auth.test and stored in a file only you can read; it is never shown again.",
+    slackSave: "Save and connect", checking: "Checking…", connectedTo: "Connected to {x}", failed: "Failed: {x}",
+    modeLive: "● Live · merges stay yours", modeLiveMerge: "● Live · auto-merge on", modeShadow: "Shadow · read-only",
+    modeTitle: "Click to switch mode",
+    modeConfirm: "Switch to live? The agent will post CI commands, findings, approvals and Slack replies as you, and merge PRs that meet the merge bar if auto-merge is on.",
+    who: "@{login} · {runner} · {n} agent job(s)",
+    srcNames: {slack: "Slack", slack_inbox: "Slack inbox", github_mentions: "GitHub @", github_assigned: "GitHub assigned",
+      github_review_requested: "Review requests"},
+    workspaces: "Connected Slack workspaces", skill: "review skill {x}", skillFailed: "review skill sync failed",
+    skillTitle: "sglang-humanize-review, synced from GitHub main", pipelineError: "Pipeline error",
+    tabs: {
+      merge: ["Ready to merge", "Approved and CI meets the merge bar. Merging is your click."],
+      ready: ["Needs you", "Only high-risk PRs: T3 changes, or the agent is unsure. CI, retries and pinging authors are the agent's job."],
+      approved: ["Approved · on CI", "Approved; the agent runs, retries and triages CI until it passes."],
+      approvedAuto: ["Approved · on CI", "Approved; the agent runs, retries and triages CI, then merges. A PR held by a WIP marker or a failed merge shows why."],
+      agent: ["Agent working", "Queued, reviewing, or retrying after an error."],
+      author: ["Waiting on author", "Findings, CI failures or conflicts were posted on the PR for the author."],
+      slack: ["Slack to reply", "Messages you still owe a reply. Review asks are handled by the agent."],
+      closed: ["Merged", "Merged PRs, newest first. Ones closed without merging or dismissed are folded below."],
+    },
+    stage: {new: "New", queued: "Queued", reviewing: "Reviewing", ci: "CI", ready: "Needs you", approved: "Approved",
+      needs_author: "Waiting on author", error: "Retrying after error", closed: "Closed", dismissed: "Dismissed", done: "Done"},
+    ready: {approve: "Ready to approve", look: "Take a look", decide: "Your call", ci: "CI needs you", merge: "Merge stuck"},
+    verdict: {lgtm: "LGTM", minor: "Minor notes", changes_needed: "Changes needed", needs_human: "Needs human"},
+    slackStatus: {pending: "Unanswered", replied: "You replied", reacted: "You reacted", agent: "Agent handling",
+      resolved: "PR closed", dismissed: "Marked handled"},
+    emptyMerge: ["Nothing to merge yet", "Approved PRs show up here once CI passes."],
+    emptyReady: ["Nothing needs you", "The agent is handling everything else."], empty: ["Empty", ""],
+    emptyMerged: ["Nothing merged yet", ""], mergedLabel: "Merged", otherClosed: "Closed without merging or dismissed · {n}",
+    merge: "Merge", approve: "Approve", blocking: "{n} blocking", stale: "review is stale", added: "added",
+    justNow: "just now", mAgo: "{n}m ago", hAgo: "{n}h ago", dAgo: "{n}d ago",
+    slackOff: ["Slack is not connected", "Use Connect Slack in the top bar."],
+    groupMentions: "Mentions you have not answered", groupDms: "DMs where they spoke last",
+    groupAgent: "Review asks the agent is handling", none: "None", fyi: "cc / fyi, not counted · {n}", handled: "Handled · {n}",
+    unanswered: "{n} unanswered", prOther: "PR link, not a review ask", reviewOld: "Review ask older than {n}d",
+    openSlack: "Open in Slack", handToAgent: "Hand to agent", handedToAgent: "Handed to the agent",
+    markHandled: "Mark handled", reopen: "Reopen", dm: "DM",
+    confirm: {approve: "Approve this PR as you?", publish_findings: "Post these findings on the PR as you?",
+      request_changes: "Post the findings and move the PR to Waiting on author?", merge: "Squash-merge this PR at the current head?",
+      dismiss: "Stop handling this PR?"},
+    done: "Done", openGithub: "Open on GitHub ↗", close: "Close", approvePrompt: "Approval comment (posted as you)",
+    postFindings: "Post findings", postWait: "Post & wait on author", rereview: "Re-review", reviewAnyway: "Review anyway",
+    defer: "Defer", dismiss: "Dismiss", restore: "Restore", staleChip: "reviewed {a}, head is {b}",
+    ghDecision: {APPROVED: "approved", REVIEW_REQUIRED: "review required", CHANGES_REQUESTED: "changes requested"},
+    whoAsked: "Who asked", message: "message ↗", triage: "Triage", risk: "Risk", riskLine: "{risk} · {lines} lines in {files} files",
+    areas: "Areas", aiMarkers: "AI markers", gates: "Gates", whatChanged: "What changed", flow: "Execution flow",
+    findings: "Findings · {k} kept · {r} rejected by the verifier", noFindings: "No findings on this head.",
+    rejected: "Rejected by the verifier", tests: "Tests", related: "Related", targeted: "Targeted runs", gaps: "Gaps",
+    history: "Maintainer review history", coverage: "Agent coverage", skipped: "skipped", min: "min", timeline: "Timeline",
+    ciTitle: "CI on the current head",
+    ciCounts: "{s} passed · {f} failed · {p} pending · {k} skipped · {c} cancelled · {g} gated",
+    aggregates: "· {n} aggregate job(s) failed as a cascade (ignored)", mergeState: "· merge {x}", notes: "Notes",
+    ciStatus: {green: "green", failed: "failed", running: "running", not_started: "not started", gated: "gated", cancelled: "cancelled"},
+    cls: {related: "related", infra: "infra", flaky: "flaky", unrelated: "unrelated", unknown: "unknown", unclassified: "unclassified"},
+    sendState: {done: "Sent", running: "Sending", todo: "Not sent"}, tries: "{n}/{m} sends",
+    targetedLink: "targeted: {x} ↗", commentLink: "comment ↗", send: "Send",
+    sev: {blocker: "blocker", major: "major", minor: "minor", nit: "nit"},
+    verify: {confirmed: "confirmed", plausible: "plausible", rejected: "rejected", unverified: "unverified"},
+    outside: "outside the diff, goes in the summary", scenario: "Scenario ", fix: "Fix ", verifier: "Verifier ",
+    raisedBefore: "raised before, still open", waived: "withdrawn after the author's reply", staleHint: "The PR has a new push; wait for the re-review.",
+    posted: "Findings posted ↗", handToAuthor: "Wait on author",
+    pageStale: "This page is out of date; reloading. Click again after it loads.",
+    agentBlocked: "codex quota used up on every account: agent paused",
+    agentBlockedHint: "Every configured codex account hit its usage limit or spend cap; jobs retry on their own.",
+    source: {slack: "Slack", "github-mention": "GitHub @", "github-assigned": "assigned on GitHub",
+      "github-review-request": "GitHub review request", manual: "added by hand"},
+    byHand: "you",
+    polling: "Polling Slack and GitHub", addedX: "Added {x}",
+  },
+  zh: {
+    add: "添加", refresh: "刷新", refreshTitle: "立即拉取 Slack 和 GitHub", connectSlack: "连接 Slack",
+    addPlaceholder: "粘贴 PR 或 Slack 消息链接", sources: "数据源",
+    slackPanelTitle: "连接 Slack 工作区",
+    slackPanelHelp: "从 Slack App 的 OAuth & Permissions 页复制 User OAuth Token（xoxp- 开头）粘到这里。会先用 auth.test 校验，存在只有你能读的文件里，之后不再显示。",
+    slackSave: "保存并连接", checking: "检查中…", connectedTo: "已连接 {x}", failed: "失败：{x}",
+    modeLive: "● 自动 · 合并由你把关", modeLiveMerge: "● 自动 · 自动合并已开", modeShadow: "影子模式 · 只读",
+    modeTitle: "点击切换模式",
+    modeConfirm: "切换到自动模式？agent 会以你的身份发 CI 命令、review 问题、approve 和 Slack 回复；开了自动合并时，达到合并标准的 PR 也会直接合并。",
+    who: "@{login} · {runner} · {n} 个 agent 任务",
+    srcNames: {slack: "Slack", slack_inbox: "Slack 收件箱", github_mentions: "GitHub @", github_assigned: "GitHub 指派",
+      github_review_requested: "Review 请求"},
+    workspaces: "已连接的 Slack 工作区", skill: "review skill {x}", skillFailed: "review skill 同步失败",
+    skillTitle: "sglang-humanize-review，从 GitHub main 同步", pipelineError: "流水线出错",
+    tabs: {
+      merge: ["可合并", "已 approve，CI 达到合并标准。合并由你来点。"],
+      ready: ["需要你", "只放高风险 PR：T3 改动，或 agent 拿不准的。CI、重试、提醒作者都由 agent 负责。"],
+      approved: ["已 approve · 跑 CI", "已 approve；agent 负责跑 CI、重试和归因，直到通过。"],
+      approvedAuto: ["已 approve · 跑 CI", "已 approve；agent 负责跑 CI、重试和归因，通过后直接合并。被 WIP 标记挡住或合并失败的会写明原因。"],
+      agent: ["Agent 处理中", "排队、review 中，或出错后自动重试。"],
+      author: ["等作者", "问题、CI 报错或冲突已经发到 PR 上，等作者处理。"],
+      slack: ["Slack 待回复", "你还欠回复的消息。review 请求由 agent 处理。"],
+      closed: ["已合并", "已合并的 PR，最新的在前。关闭未合并或已忽略的折叠在下面。"],
+    },
+    stage: {new: "新建", queued: "排队中", reviewing: "review 中", ci: "CI", ready: "需要你", approved: "已 approve",
+      needs_author: "等作者", error: "出错，自动重试中", closed: "已关闭", dismissed: "已忽略", done: "完成"},
+    ready: {approve: "可以 approve", look: "请你看看", decide: "你来定", ci: "CI 需要你", merge: "合并卡住"},
+    verdict: {lgtm: "LGTM", minor: "小问题", changes_needed: "需要修改", needs_human: "需人工判断"},
+    slackStatus: {pending: "未回复", replied: "你已回复", reacted: "你已回表情", agent: "Agent 处理中",
+      resolved: "PR 已关闭", dismissed: "已标记处理"},
+    emptyMerge: ["暂时没有可合并的 PR", "approve 过且 CI 通过的 PR 会出现在这里。"],
+    emptyReady: ["没有需要你处理的", "其余都由 agent 处理。"], empty: ["空", ""],
+    emptyMerged: ["还没有合并的 PR", ""], mergedLabel: "已合并", otherClosed: "关闭未合并或已忽略 · {n}",
+    merge: "合并", approve: "Approve", blocking: "{n} 个阻塞", stale: "review 已过期", added: "手动添加",
+    justNow: "刚刚", mAgo: "{n} 分钟前", hAgo: "{n} 小时前", dAgo: "{n} 天前",
+    slackOff: ["Slack 未连接", "点顶栏的「连接 Slack」。"],
+    groupMentions: "还没回的 @", groupDms: "对方最后发言的私信",
+    groupAgent: "agent 正在处理的 review 请求", none: "无", fyi: "抄送 / FYI，不计数 · {n}", handled: "已处理 · {n}",
+    unanswered: "{n} 条未回", prOther: "有 PR 链接，但不是 review 请求", reviewOld: "超过 {n} 天的 review 请求",
+    openSlack: "在 Slack 打开", handToAgent: "交给 agent", handedToAgent: "已交给 agent",
+    markHandled: "标记已处理", reopen: "重新打开", dm: "私信",
+    confirm: {approve: "以你的身份 approve 这个 PR？", publish_findings: "以你的身份把这些问题发到 PR 上？",
+      request_changes: "发出问题，并把 PR 移到「等作者」？", merge: "按当前 head squash 合并这个 PR？",
+      dismiss: "不再处理这个 PR？"},
+    done: "已完成", openGithub: "在 GitHub 打开 ↗", close: "关闭", approvePrompt: "approve 评论（以你的身份发出）",
+    postFindings: "发出问题", postWait: "发出并等作者", rereview: "重新 review", reviewAnyway: "仍然 review",
+    defer: "推迟", dismiss: "忽略", restore: "恢复", staleChip: "review 的是 {a}，head 已是 {b}",
+    ghDecision: {APPROVED: "已批准", REVIEW_REQUIRED: "待 review", CHANGES_REQUESTED: "要求修改"},
+    whoAsked: "谁提的", message: "消息 ↗", triage: "分诊", risk: "风险", riskLine: "{risk} · {files} 个文件 {lines} 行",
+    areas: "涉及模块", aiMarkers: "AI 痕迹", gates: "门槛", whatChanged: "改了什么", flow: "执行流程",
+    findings: "问题 · 保留 {k} 个 · 复核否掉 {r} 个", noFindings: "当前 head 没有问题。",
+    rejected: "被复核否掉的", tests: "测试", related: "相关测试", targeted: "定向测试", gaps: "缺口",
+    history: "维护者 review 历史", coverage: "Agent 覆盖面", skipped: "跳过", min: "分钟", timeline: "时间线",
+    ciTitle: "当前 head 的 CI",
+    ciCounts: "通过 {s} · 失败 {f} · 进行中 {p} · 跳过 {k} · 取消 {c} · 被门控 {g}",
+    aggregates: "· {n} 个汇总 job 级联失败（已忽略）", mergeState: "· 合并状态 {x}", notes: "备注",
+    ciStatus: {green: "通过", failed: "失败", running: "运行中", not_started: "未开始", gated: "被门控", cancelled: "被取消"},
+    cls: {related: "与改动相关", infra: "基础设施", flaky: "偶发", unrelated: "无关", unknown: "不确定", unclassified: "未归因"},
+    sendState: {done: "已发送", running: "发送中", todo: "未发送"}, tries: "已发 {n}/{m} 次",
+    targetedLink: "定向测试：{x} ↗", commentLink: "评论 ↗", send: "发送",
+    sev: {blocker: "阻塞", major: "严重", minor: "次要", nit: "细节"},
+    verify: {confirmed: "已确认", plausible: "可能", rejected: "否掉", unverified: "未复核"},
+    outside: "在 diff 之外，放进总结", scenario: "场景 ", fix: "修法 ", verifier: "复核 ",
+    raisedBefore: "之前提过，仍未解决", waived: "作者回复后已撤回", staleHint: "PR 有新 push，等重新 review 完再发。",
+    posted: "问题已发出 ↗", handToAuthor: "移到等作者",
+    pageStale: "页面已过期，正在刷新，刷新后再点一次。",
+    agentBlocked: "codex 账号额度都用完了：agent 暂停",
+    agentBlockedHint: "配置的 codex 账号都到了用量上限或 spend cap；任务会自己重试。",
+    source: {slack: "Slack", "github-mention": "GitHub @", "github-assigned": "GitHub 指派给你",
+      "github-review-request": "GitHub review 请求", manual: "手动添加"},
+    byHand: "你",
+    polling: "正在拉取 Slack 和 GitHub", addedX: "已添加 {x}",
+  },
+};
+// Status lines and timeline events come from the server in English; these
+// phrase rules translate them for the Chinese view. Unmatched text (e.g. an
+// agent's own explanation) stays English.
+const ZH_RULES = [
+  // agent fixes (task phrases first, then the sentence around them)
+  [/^agent pushed ([0-9a-f]{8}): /g, "agent 推送了 $1："],
+  [/agent pushed ([0-9a-f]{8}) \((.+)\); reviewing the new head/g, "agent 推送了 $1（$2），正在 review 新 head"],
+  [/resolve the merge conflicts with main/g, "解决与 main 的冲突"],
+  [/fix the verified review findings/g, "修复已确认的问题"],
+  [/fix the CI failures caused by this change/g, "修复这次改动导致的 CI 失败"],
+  [/agent is trying to /g, "agent 正在自己"],
+  [/^agent could not /g, "agent 没能"],
+  [/; asking the author/g, "，改为请作者处理"],
+  [/needs your look: /g, "需要你看："],
+  [/blocking issues confirmed, posted on the PR, waiting for the author/g, "阻塞问题已确认并发到 PR，等作者处理"],
+  [/blocking issues confirmed/g, "阻塞问题已确认"],
+  [/approved; merge conflict with main/g, "已 approve；与 main 冲突，已提醒作者 rebase"],
+  [/CI failures related to the change \((.+?)\); author pinged/g, "CI 失败与改动相关（$1），已 @ 作者"],
+  [/CI still failing after a rerun \((.+?)\); author pinged/g, "重跑后 CI 仍失败（$1），已 @ 作者"],
+  [/(\d+) unattributed CI failure\(s\), rerunning once/g, "$1 个原因不明的 CI 失败，先重跑一次"],
+  [/(\d+) CI failure\(s\) without a readable log; the agent keeps watching/g, "$1 个 CI 失败拿不到日志，agent 继续盯着"],
+  [/fork CI runs wait for approval and the PR edits \.github\/; approve them yourself/g, "fork 的 CI 在等批准，且 PR 改了 .github/，需要你亲自批准"],
+  [/CI running \((\d+) passed, (\d+) failed, (\d+) pending\)/g, "CI 运行中（通过 $1，失败 $2，进行中 $3）"],
+  [/, approved (\d+) held run\(s\)/g, "，已批准 $1 个挂起的 run"],
+  [/, agent is reading the logs/g, "，agent 正在读日志归因"],
+  [/, agent retrying: /g, "，agent 重试中："],
+  [/, targeted tests running/g, "，定向测试运行中"],
+  [/, still not passing after (\d+) retries; the agent keeps watching/g, "，重试 $1 次仍未通过，agent 继续盯着"],
+  [/CI passed, GitHub still needs a code-owner approval/g, "CI 已通过，GitHub 还需要 code owner approve"],
+  [/ready to merge; auto-merge failed, retrying: /g, "可以合并；自动合并失败，稍后重试："],
+  [/^auto-merge failed (\d+) times: /g, "自动合并已失败 $1 次："],
+  [/GitHub blocks the merge: commit (.+?) is not linked to a GitHub account; author asked/g, "GitHub 拒绝合并：commit $1 没有关联到 GitHub 账号，已请作者处理"],
+  [/ready to merge; held by a WIP \/ do-not-merge marker/g, "可以合并；有 WIP / do-not-merge 标记，不自动合并"],
+  [/ready to merge; daily auto-merge budget used/g, "可以合并；今日自动合并额度已用完"],
+  [/^ready to merge$/g, "可以合并"],
+  [/CI has not started/g, "CI 还没开始"],
+  [/CI is held by the run-ci gate/g, "CI 被 run-ci 门控拦住"],
+  [/(\d+) job\(s\) cancelled/g, "$1 个 job 被取消"],
+  [/(\d+) CI failure\(s\)/g, "$1 个 CI 失败"],
+  [/CI passed/g, "CI 已通过"],
+  [/; send /g, "；需发送 "],
+  [/no blocking issues; daily approval budget used, approving when it frees up/g, "没有阻塞问题；今日 approve 额度已用完，额度释放后自动 approve"],
+  [/no blocking issues, ready to approve/g, "没有阻塞问题，可以 approve"],
+  [/daily agent-review budget used \((\d+)\/24h\), queued/g, "今日 agent review 额度已用完（$1/24h），排队中"],
+  [/waiting for agent review \((T\d)\)/g, "等待 agent review（$1）"],
+  [/agent reviewing \((T\d), (\w+)\)/g, "agent review 中（$1，$2）"],
+  [/approved, tracking CI until mergeable/g, "已 approve，跟踪 CI 直到可合并"],
+  [/you already approved this head on GitHub/g, "你已在 GitHub 上 approve 过这个 head"],
+  [/^failure #(\d+): /g, "第 $1 次出错，自动重试中："],
+  [/still a draft/g, "仍是草稿"],
+  [/(\d+) changed lines, over the (\d+) limit/g, "改动 $1 行，超过 $2 行上限"],
+  [/no test commands or results in the description/g, "描述里没有测试命令或结果"],
+  [/perf PR without before\/after numbers/g, "性能 PR 没有前后对比数据"],
+  [/merge conflict with main/g, "与 main 有冲突"],
+  [/^PR is merged$/g, "PR 已合并"], [/^PR is closed$/g, "PR 已关闭"],
+  [/^merged$/g, "已合并"], [/^closed$/g, "已关闭"], [/^your own PR$/g, "你自己的 PR"],
+  [/you confirmed the findings and sent them to the author/g, "你确认了问题并发给了作者"],
+  [/^deferred$/g, "已推迟"], [/^won't handle$/g, "不处理"], [/you restored this card/g, "你恢复了这张卡"],
+  // merge notes
+  [/(\d+) failure\(s\) on lanes this change does not need: /g, "$1 个失败在本改动不需要的硬件档位上："],
+  [/(\d+) required job\(s\) stayed cancelled after reruns: /g, "$1 个必需 job 重跑后仍被取消："],
+  [/ kept failing for (\w+) reasons after retries/g, " 多次重试后仍因 $1 原因失败（与改动无关）"],
+  [/targeted tests never reported back after (\d+) sends/g, "定向测试发了 $1 次都没有回结果"],
+  // timeline events
+  [/^agent review done: (\w+), (\d+) finding\(s\) kept, (\d+) rejected by the verifier/g, "agent review 完成：$1，保留 $2 个问题，复核否掉 $3 个"],
+  [/, skill ([0-9a-f]+)/g, "，skill $1"],
+  [/^new push: /g, "新 push："],
+  [/^agent sent /g, "agent 发送了 "], [/^you sent /g, "你发送了 "],
+  [/^agent approved held CI run: /g, "agent 批准了挂起的 CI run："],
+  [/^agent approved /g, "agent approve 了 "], [/^you approved /g, "你 approve 了 "],
+  [/^published (\d+) finding\(s\)/g, "发出 $1 个问题"],
+  [/^note to the author: /g, "给作者的留言："],
+  [/^Slack reply \((\w+)\): /g, "Slack 回复（$1）："],
+  [/^CI triage: /g, "CI 归因："],
+  [/^refresh failed: /g, "刷新失败："],
+  [/agent is answering (\d+) reply\(ies\) on the PR/g, "agent 正在回复 PR 上的 $1 条回复"],
+  [/^agent answered (\S+) \(concede\): /g, "agent 回复了 $1（认可，撤回该意见）："],
+  [/^agent answered (\S+) \(hold\): /g, "agent 回复了 $1（意见仍成立）："],
+  [/^agent answered (\S+) \(maintainer\): /g, "agent 回复了 $1（需要你拍板）："],
+  [/the author disputes a finding: /g, "作者对一条意见有异议："],
+  [/^following your GitHub comment \(concede\): /g, "按你在 GitHub 上的回复执行（撤回该意见）："],
+  [/^following your GitHub comment \(approve\): /g, "按你在 GitHub 上的回复执行（approve）："],
+  [/^following your GitHub comment \(hold\): /g, "按你在 GitHub 上的回复执行（交给作者修改）："],
+  [/^following your GitHub comment \(\w+\): /g, "已读你在 GitHub 上的回复："],
+  [/every codex account is out of quota, retrying automatically/g, "codex 账号额度都用完了，自动重试中"],
+  [/^your (\w+) failed: /g, "你点的 $1 失败了："],
+  [/^auto-merge failed: /g, "自动合并失败："],
+  [/^agent merged /g, "agent 合并了 "], [/^you merged /g, "你合并了 "],
+  [/^you asked to review despite the gates$/g, "你要求无视门槛继续 review"],
+  [/^you asked for a re-review$/g, "你要求重新 review"],
+  [/^sending (.+?) failed: /g, "发送 $1 失败："],
+  [/^note to the author failed: /g, "给作者留言失败："],
+  [/^Slack reply failed: /g, "Slack 回复失败："],
+  [/^approving held run (.+?) failed: /g, "批准挂起的 run $1 失败："],
+];
+const LANG_KEY = "review-inbox-lang";
+let lang = (() => {
+  try { const saved = localStorage.getItem(LANG_KEY); if (saved === "en" || saved === "zh") return saved; } catch (e) {}
+  return (navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en";
+})();
+function t(key, vars = {}) {
+  const value = key.split(".").reduce((o, k) => o && o[k], I18N[lang]);
+  const text = value === undefined ? key.split(".").reduce((o, k) => o && o[k], I18N.en) : value;
+  return typeof text === "string" ? text.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? "") : text;
+}
+// Text the agent wrote (review summary, findings, reasons) is English; the
+// server sends cached Chinese translations as {english: chinese}. Until one is
+// ready the English shows.
+let listZh = {}, drawerZh = {}, drawerWaived = [];
+const A = text => (lang === "zh" && text && (drawerZh[text] || listZh[text])) || text || "";
+const AGENT_TAIL = /^(needs your look: |CI triage: )([\s\S]*)$/;
+const rules = text => ZH_RULES.reduce((s, [re, rep]) => s.replace(re, rep), String(text));
+const STAGE_EVENT = /^(\w+) → (\w+)(?:: ([\s\S]*))?$/;  // "approved → ready: reason"
+const tr = text => {
+  if (lang !== "zh" || !text) return text || "";
+  const stage = String(text).match(STAGE_EVENT);
+  if (stage && I18N.en.stage[stage[1]] && I18N.en.stage[stage[2]])
+    return `${t("stage." + stage[1])} → ${t("stage." + stage[2])}` + (stage[3] ? "：" + tr(stage[3]) : "");
+  const m = String(text).match(AGENT_TAIL);
+  return m && A(m[2]) !== m[2] ? rules(m[1]) + A(m[2]) : rules(text);
+};
+function setLang(next) {
+  lang = next;
+  try { localStorage.setItem(LANG_KEY, next); } catch (e) {}
+  applyStatic();
+  if (state) { renderTop(); renderTiles(); renderList(); if (openKey) openDrawer(openKey); }
+}
+function applyStatic() {
+  document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+  document.querySelectorAll("[data-i18n]").forEach(node => { node.textContent = t(node.dataset.i18n); });
+  document.getElementById("add-url").placeholder = t("addPlaceholder");
+  document.getElementById("poll-btn").title = t("refreshTitle");
+  document.getElementById("mode").title = t("modeTitle");
+  document.getElementById("slack-panel-help").textContent = t("slackPanelHelp");
+  for (const b of document.querySelectorAll(".seg button")) b.classList.toggle("on", b.dataset.lang === lang);
+}
+
+const TABS = [
+  // with auto-merge on, mergeable PRs are merged by the agent: no tile of their own
+  {id: "merge", stages: ["approved"], filter: c => c.merge_ready, hot: true, hidden: () => autoMerge()},
+  {id: "ready", stages: ["ready"], hot: true},
+  {id: "approved", stages: ["approved"], filter: c => !c.merge_ready || autoMerge()},
+  {id: "agent", stages: ["new", "queued", "reviewing", "ci", "error"]},
+  {id: "author", stages: ["needs_author"]},
+  {id: "slack", stages: []},
+  {id: "closed", stages: ["closed", "dismissed", "done"], filter: c => isMerged(c)},
+];
+const autoMerge = () => state && state.mode === "live" && (state.policy || {}).auto_merge;
+const tabText = tab => t("tabs." + (tab.id === "approved" && autoMerge() ? "approvedAuto" : tab.id));
+const tabLabel = tab => tabText(tab)[0], tabHint = tab => tabText(tab)[1];
+const RAIL = {approved: "var(--ok)", ready: "var(--accent)", needs_author: "var(--warn)", error: "var(--bad)",
+  reviewing: "var(--rust)", queued: "var(--line-strong)", ci: "var(--peach-2)", closed: "var(--line)", dismissed: "var(--line)"};
+const VERDICT_CLS = {lgtm: "ok", minor: "ok", changes_needed: "bad", needs_human: "warn"};
+const SLACK_CLS = {pending: "accent", replied: "ok", reacted: "ok", agent: "", resolved: "ok", dismissed: "outline"};
+const verdictChip = v => v && VERDICT_CLS[v] !== undefined ? chip(t("verdict." + v), VERDICT_CLS[v]) : null;
+const isMerged = c => c.stage === "closed" && c.stage_reason === "merged";
+const cardLabel = c => isMerged(c) ? t("mergedLabel") : stageLabel(c.stage, c.ready_kind || (c.decision || {}).ready_kind);
+const stageLabel = (stage, kind) => stage === "ready" ? (kind && t("ready." + kind)) || t("stage.ready") : t("stage." + stage) || stage;
+let state = null, current = "merge", openKey = null;
+
+const dark = () => document.documentElement.dataset.theme === "dark" ||
+  (!document.documentElement.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
+if (window.mermaid) mermaid.initialize({startOnLoad: false, securityLevel: "strict", theme: "base",
+  themeVariables: dark() ? {primaryColor: "#2D1F18", primaryBorderColor: "#F08A5C", primaryTextColor: "#F7EDE5",
+    lineColor: "#A68D7E", fontFamily: "Inter, sans-serif", fontSize: "13px", tertiaryColor: "#1E1714"}
+  : {primaryColor: "#F9E6DB", primaryBorderColor: "#A5300F", primaryTextColor: "#1F1410", lineColor: "#8A7366",
+    fontFamily: "Inter, sans-serif", fontSize: "13px", tertiaryColor: "#FFFFFF"}});
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v;
+    else if (k === "style") node.style.cssText = v;
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null && v !== false) node.setAttribute(k, v === true ? "" : v);
+  }
+  for (const child of children.flat()) {
+    if (child === null || child === undefined || child === false) continue;
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+  return node;
+}
+const chip = (text, cls = "") => el("span", {class: "chip " + cls}, text);
+const link = (href, text) => el("a", {href, target: "_blank", rel: "noopener"}, text);
+function ago(ts) {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 90) return t("justNow");
+  if (s < 5400) return t("mAgo", {n: Math.round(s / 60)});
+  if (s < 172800) return t("hAgo", {n: Math.round(s / 3600)});
+  return t("dAgo", {n: Math.round(s / 86400)});
+}
+function toast(msg) {
+  const node = document.getElementById("toast");
+  node.textContent = msg; node.style.display = "block";
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => node.style.display = "none", 4000);
+}
+async function post(path, body) {
+  const res = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json", "X-Inbox-Token": TOKEN},
+    body: JSON.stringify(body)});
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 403) {  // page opened before a token change: reload instead of failing every click
+    toast(t("pageStale")); setTimeout(() => location.reload(), 1200);
+    throw new Error(t("pageStale"));
+  }
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+async function refresh() {
+  try { state = await (await fetch("/api/state")).json(); } catch (e) { return; }
+  listZh = state.zh || {};
+  renderTop(); renderTiles(); renderList();
+  if (openKey) openDrawer(openKey, true);
+}
+
+function renderTop() {
+  const mode = document.getElementById("mode");
+  mode.className = "pill " + (state.mode === "live" ? "live" : "shadow");
+  mode.textContent = state.mode !== "live" ? t("modeShadow") : autoMerge() ? t("modeLiveMerge") : t("modeLive");
+  document.getElementById("who").textContent =
+    t("who", {login: state.login, runner: state.runner, n: Object.keys(state.inflight).length});
+  const src = document.getElementById("sources"); src.replaceChildren();
+  for (const [name, s] of Object.entries(state.status.sources || {})) {
+    if (s.off) continue;
+    const dot = s.ok === true ? "ok" : s.ok === false ? "bad" : "";  // no result yet: first poll still running
+    src.append(el("span", {class: "pill", title: s.note || t("checking")}, el("span", {class: "dot " + dot}), t("srcNames")[name] || name));
+  }
+  if ((state.slack_workspaces || []).length) src.append(el("span", {class: "pill", title: t("workspaces")}, state.slack_workspaces.join(" · ")));
+  const skill = state.status.skill;
+  if (skill) src.append(el("span", {class: "pill", title: skill.note || t("skillTitle")},
+    el("span", {class: "dot " + (skill.ok ? "ok" : "bad")}), skill.ok ? t("skill", {x: skill.commit.slice(0, 7)}) : t("skillFailed")));
+  if (state.status.agent_blocked) src.append(el("span", {class: "pill", title: t("agentBlockedHint")},
+    el("span", {class: "dot bad"}), t("agentBlocked")));
+  if (state.status.last_error) src.append(el("span", {class: "pill", title: state.status.last_error}, el("span", {class: "dot bad"}), t("pipelineError")));
+}
+const cardsFor = tab => state.cards.filter(c => tab.stages.includes(c.stage) && (!tab.filter || tab.filter(c)));
+const slackItems = () => state.mentions.filter(m => m.source === "slack");
+const slackOwed = () => slackItems().filter(m => m.status === "pending" && m.kind !== "fyi");
+const tabCount = tab => tab.id === "slack" ? slackOwed().length : cardsFor(tab).length;
+const visibleTabs = () => TABS.filter(tab => !(tab.hidden && tab.hidden()));
+function renderTiles() {
+  const tiles = document.getElementById("tiles"); tiles.replaceChildren();
+  const tabs = visibleTabs();
+  if (!tabs.some(tab => tab.id === current)) current = "ready";
+  tiles.style.setProperty("--tiles", tabs.length);
+  for (const tab of tabs) {
+    const n = tabCount(tab);
+    tiles.append(el("button", {class: "tile" + (tab.id === current ? " active" : "") + (tab.hot && n ? " hot" : ""),
+      onclick: () => { current = tab.id; renderTiles(); renderList(); }},
+      el("div", {class: "n"}, n), el("div", {class: "l"}, tabLabel(tab))));
+  }
+  const tab = TABS.find(x => x.id === current);
+  document.getElementById("list-title").textContent = tabLabel(tab);
+  document.getElementById("list-hint").textContent = tabHint(tab);
+}
+function requesterText(c) {
+  const r = c.requesters || [];
+  if (!r.length) return null;
+  const who = [...new Set(r.map(x => x.author))].slice(0, 3).join(", ");
+  const via = r.some(x => x.source === "slack") ? "Slack" : r.every(x => x.source === "manual") ? t("added") : "GitHub";
+  return `${via}: ${who}`;
+}
+function ciBar(counts) {
+  const total = (counts.success || 0) + (counts.failure || 0) + (counts.pending || 0) + (counts.cancelled || 0) + (counts.gated || 0);
+  if (!total) return null;
+  const seg = (n, color) => n ? el("span", {style: `width:${100 * n / total}%;background:${color}`}) : null;
+  return el("span", {class: "cibar", title: ciCountText(counts)},
+    seg(counts.success, "var(--ok)"), seg(counts.failure, "var(--bad)"), seg(counts.pending, "var(--warn)"),
+    seg((counts.cancelled || 0) + (counts.gated || 0), "var(--line-strong)"));
+}
+const ciCountText = c => t("ciCounts", {s: c.success || 0, f: c.failure || 0, p: c.pending || 0, k: c.skipped || 0,
+  c: c.cancelled || 0, g: c.gated || 0});
+function renderList() {
+  const list = document.getElementById("list"); list.replaceChildren();
+  const tab = TABS.find(x => x.id === current);
+  if (tab.id === "slack") { renderSlack(list); return; }
+  const cards = cardsFor(tab);
+  if (tab.id === "closed") cards.sort((a, b) => b.updated_at - a.updated_at);
+  const folded = tab.id === "closed"
+    ? state.cards.filter(c => tab.stages.includes(c.stage) && !isMerged(c)).sort((a, b) => b.updated_at - a.updated_at) : [];
+  if (!cards.length) {
+    const empty = {merge: t("emptyMerge"), ready: t("emptyReady"),
+      closed: t("emptyMerged")}[tab.id] || t("empty");
+    list.append(el("div", {class: "empty"}, el("b", {}, empty[0]), empty[1]));
+  }
+  for (const c of cards) list.append(cardRow(c));
+  if (folded.length) list.append(el("details", {}, el("summary", {}, t("otherClosed", {n: folded.length})),
+    el("div", {class: "list"}, folded.map(cardRow))));
+}
+function cardRow(c) {
+  const blocking = c.findings.filter(f => ["blocker", "major"].includes(f.severity)).length;
+  const quick = (c.merge_ready || (c.stage === "ready" && c.ready_kind === "merge")) && !c.review_stale
+    ? el("button", {class: "primary", onclick: e => { e.stopPropagation(); doAction(c.key, "merge"); }}, t("merge"))
+    : c.stage === "ready" && c.ready_kind === "approve" && !c.review_stale
+    ? el("button", {class: "primary", onclick: e => { e.stopPropagation(); doAction(c.key, "approve"); }}, t("approve")) : null;
+  return el("div", {class: "row", style: `--rail:${isMerged(c) ? "var(--ok)" : RAIL[c.stage] || "var(--line-strong)"}`, onclick: () => openDrawer(c.key)},
+    el("div", {class: "main"},
+      el("div", {class: "title"}, c.title || c.key),
+      el("div", {class: "meta"},
+        el("span", {class: "mono"}, "#" + c.number), c.author && el("span", {}, "@" + c.author),
+        c.tier && chip(c.tier, c.tier === "T3" ? "bad" : c.tier === "T2" ? "warn" : "ok"),
+        verdictChip(c.verdict), blocking ? chip(t("blocking", {n: blocking}), "bad") : null,
+        ciBar(c.ci_counts || {}),
+        el("span", {class: "mono"}, `+${c.additions} −${c.deletions}`),
+        c.ai_signals.length ? chip("AI: " + c.ai_signals.join(", "), "outline") : null,
+        requesterText(c) && el("span", {}, requesterText(c)),
+        c.review_stale ? chip(t("stale"), "bad") : null,
+        el("span", {}, ago(c.updated_at))),
+      el("div", {class: "why"}, el("b", {style: "color:var(--rust);font-weight:600"}, cardLabel(c)),
+        c.stage_reason && !isMerged(c) ? " · " + tr(c.stage_reason) : ""),
+      (c.merge_notes || []).length ? el("div", {class: "notes"}, c.merge_notes.map(n => el("div", {}, "· " + tr(n)))) : null),
+    quick);
+}
+
+function renderSlack(list) {
+  const items = slackItems();
+  if (!(state.slack_workspaces || []).length && !items.length) {
+    const off = t("slackOff");
+    list.append(el("div", {class: "empty"}, el("b", {}, off[0]), off[1]));
+    return;
+  }
+  const isDm = m => m.id.startsWith("slackdm:");
+  const groups = [
+    [t("groupMentions"), slackOwed().filter(m => !isDm(m))],
+    [t("groupDms"), slackOwed().filter(isDm)],
+    [t("groupAgent"), items.filter(m => m.status === "agent")],
+  ];
+  for (const [title, ms] of groups) {
+    list.append(el("div", {class: "group"}, title, el("span", {class: "count"}, ms.length)));
+    if (!ms.length) list.append(el("div", {class: "meta", style: "margin:0 2px 6px"}, t("none")));
+    for (const m of ms) list.append(slackRow(m));
+  }
+  const fyi = items.filter(m => m.status === "pending" && m.kind === "fyi");
+  const done = items.filter(m => ["replied", "reacted", "resolved", "dismissed"].includes(m.status));
+  list.append(el("details", {}, el("summary", {}, t("fyi", {n: fyi.length})), fyi.map(slackRow)));
+  list.append(el("details", {}, el("summary", {}, t("handled", {n: done.length})), done.map(slackRow)));
+}
+function slackRow(m) {
+  const cards = (m.pr_keys || []).map(k => state.cards.find(c => c.key === k)).filter(Boolean);
+  const label = t("slackStatus")[m.status] || m.status;
+  const channel = m.channel === "DM" ? t("dm") : m.channel ? "#" + m.channel : null;
+  return el("div", {class: "row", style: `--rail:${m.status === "pending" ? "var(--accent)" : "var(--line)"};cursor:default`},
+    el("div", {class: "main"},
+      el("div", {class: "meta", style: "margin-top:0"}, chip(label, SLACK_CLS[m.status] || ""), el("b", {style: "color:var(--ink)"}, m.author || "?"),
+        channel, m.count > 1 ? chip(t("unanswered", {n: m.count}), "warn") : null, ago(m.ts),
+        m.kind === "pr-other" ? chip(t("prOther"), "outline") : null,
+        m.kind === "review-old" ? chip(t("reviewOld", {n: state.review_max_age_days || 3}), "warn") : null),
+      el("div", {class: "pre", style: "margin-top:6px"}, (m.text || "").slice(0, 600)),
+      cards.map(c => el("div", {class: "meta"}, "→ ", el("a", {href: "#", onclick: e => { e.preventDefault(); openDrawer(c.key); }}, c.key),
+        chip(cardLabel(c), "outline"), tr(c.stage_reason)))),
+    el("div", {class: "actions"},
+      m.permalink ? link(m.permalink, t("openSlack")) : null,
+      ["pr-other", "review-old"].includes(m.kind) && m.status === "pending" ? el("button", {onclick: async () => {
+        const urls = (m.pr_keys || []).map(k => `https://github.com/${k.replace("#", "/pull/")}`).join(" ") || m.text;
+        try { await post("/api/add", {url: urls, who: m.author}); await post("/api/slack-item", {id: m.id, action: "done"}); toast(t("handedToAgent")); }
+        catch (err) { toast(t("failed", {x: err.message})); }
+        refresh(); }}, t("handToAgent")) : null,
+      m.status === "pending" ? el("button", {onclick: () => slackItem(m.id, "done")}, t("markHandled")) : null,
+      m.status === "dismissed" ? el("button", {class: "ghost", onclick: () => slackItem(m.id, "reopen")}, t("reopen")) : null));
+}
+async function slackItem(id, action) {
+  try { await post("/api/slack-item", {id, action}); } catch (e) { toast(t("failed", {x: e.message})); }
+  refresh();
+}
+
+async function doAction(key, action, extra = {}) {
+  const ask = t("confirm")[action];
+  const preconfirmed = action === "approve" && extra.note !== undefined;
+  if (ask && !preconfirmed && !confirm(ask)) return;
+  try { await post("/api/action", {key, action, ...extra}); toast(t("done")); }
+  catch (e) { toast(t("failed", {x: e.message})); }
+  refresh();
+}
+// the same person asking again through the same channel is one row (newest kept)
+const uniqueRequesters = list => [...new Map(list.map(r => [`${r.source}|${r.author}|${r.text || ""}`, r])).values()];
+function card(title, ...children) { return el("section", {class: "panel card"}, el("h3", {}, title), ...children); }
+async function openDrawer(key, quiet) {
+  openKey = key;
+  const res = await fetch("/api/pr?key=" + encodeURIComponent(key));
+  if (!res.ok) return;
+  const c = await res.json();
+  const d = document.getElementById("drawer");
+  const sig = JSON.stringify([c.updated_at, c.events.length, lang, Object.keys(c.zh || {}).length]);
+  if (quiet && d.dataset.sig === sig) return;
+  d.dataset.sig = sig;
+  const keepTop = quiet ? d.scrollTop : 0;
+  drawerZh = c.zh || {};
+  drawerWaived = (c.decision || {}).waived_findings || [];
+  const postedAction = (c.actions || []).find(a => a.event === "review:findings" && a.head === c.head_sha && a.phase === "done");
+  const posted = postedAction ? (typeof postedAction.result === "string" ? JSON.parse(postedAction.result || "{}") : postedAction.result || {}) : null;
+  const review = c.review || {}, ci = c.ci || {}, triage = c.triage || {};
+  const stale = c.review_head && c.review_head !== c.head_sha;
+  const findings = review.findings || [];
+  const ghDecision = c.review_decision ? (t("ghDecision")[c.review_decision] || c.review_decision.toLowerCase().replace("_", " ")) : "";
+  d.replaceChildren(
+    el("div", {class: "dhead"},
+      el("div", {class: "actions", style: "justify-content:space-between"},
+        el("div", {class: "meta", style: "margin:0"}, el("span", {class: "mono"}, c.key), "@" + c.author,
+          c.tier && chip(c.tier, c.tier === "T3" ? "bad" : c.tier === "T2" ? "warn" : "ok"), verdictChip(review.verdict),
+          ghDecision && chip("GitHub: " + ghDecision, "outline")),
+        el("div", {class: "actions"}, link(c.url, t("openGithub")), el("button", {class: "ghost", onclick: closeDrawer}, t("close")))),
+      el("h1", {}, c.title || c.key),
+      el("div", {class: "actions"},
+        c.stage === "approved" || (c.stage === "ready" && (c.decision || {}).ready_kind === "merge")
+          ? el("button", {class: "primary", disabled: stale || (c.stage === "approved" && !(c.decision || {}).merge_ready),
+              onclick: () => doAction(c.key, "merge")}, t("merge")) : null,
+        el("button", {class: c.stage === "approved" ? "" : "primary", disabled: !review.verdict || stale, onclick: () => {
+          const note = prompt(t("approvePrompt"), review.approve_note || "LGTM.");
+          if (note !== null) doAction(c.key, "approve", {note});
+        }}, t("approve")),
+        // nothing to post when the verifier kept no finding; a stale review must be redone first;
+        // findings are posted once per head, after that only the hand-off to the author remains
+        findings.length && posted ? link(posted.url, t("posted")) : null,
+        findings.length && !posted ? el("button", {disabled: stale, title: stale ? t("staleHint") : null,
+          onclick: () => doAction(c.key, "publish_findings")}, t("postFindings")) : null,
+        findings.length && c.stage !== "needs_author" ? el("button", {disabled: stale, title: stale ? t("staleHint") : null,
+          onclick: () => doAction(c.key, "request_changes")}, posted ? t("handToAuthor") : t("postWait")) : null,
+        el("button", {class: "ghost", onclick: () => doAction(c.key, "rereview")}, t("rereview")),
+        (triage.gates || []).length ? el("button", {class: "ghost", onclick: () => doAction(c.key, "force_review")}, t("reviewAnyway")) : null,
+        el("button", {class: "ghost", onclick: () => doAction(c.key, "defer")}, t("defer")),
+        el("button", {class: "ghost danger", onclick: () => doAction(c.key, "dismiss")}, t("dismiss")),
+        ["closed", "dismissed"].includes(c.stage) ? el("button", {onclick: () => doAction(c.key, "restore")}, t("restore")) : null),
+      el("div", {class: "status"}, el("b", {}, cardLabel(c)), el("span", {}, isMerged(c) ? "" : tr(c.stage_reason)),
+        stale ? chip(t("staleChip", {a: c.review_head.slice(0, 8), b: c.head_sha.slice(0, 8)}), "bad") : null)),
+    el("div", {class: "dbody"},
+      (c.requesters || []).length ? card(t("whoAsked"), uniqueRequesters(c.requesters).map(r => el("div", {style: "margin-bottom:8px"},
+        el("div", {class: "meta", style: "margin:0"}, chip(t("source")[r.source] || r.source, "outline"),
+          el("b", {style: "color:var(--ink)"}, r.author === "added by hand" ? t("byHand") : r.author),
+          r.channel ? (r.channel === "DM" ? t("dm") : "#" + r.channel) : null, r.ts ? ago(r.ts) : null,
+          r.permalink ? link(r.permalink, t("message")) : null),
+        r.text ? el("div", {class: "pre", style: "margin-top:4px;color:var(--ink-2)"}, r.text) : null))) : null,
+      card(t("triage"), el("div", {class: "kv"},
+        el("div", {class: "k"}, t("risk")), el("div", {}, t("riskLine", {risk: triage.risk_level || "?", lines: triage.lines || 0, files: triage.files || 0})),
+        el("div", {class: "k"}, t("areas")), el("div", {class: "meta", style: "margin:0"}, Object.entries(triage.areas || {}).map(([a, n]) => chip(`${a} ${n}`))),
+        el("div", {class: "k"}, t("aiMarkers")), el("div", {}, (triage.ai_signals || []).join(", ") || t("none")),
+        (triage.gates || []).length ? [el("div", {class: "k"}, t("gates")), el("div", {}, triage.gates.map(g => el("div", {}, "⛔ " + tr(g.reason))))] : null)),
+      review.summary ? card(t("whatChanged"), el("div", {class: "pre"}, A(review.summary))) : null,
+      review.mermaid ? card(t("flow"), el("div", {class: "mermaid-wrap", id: "mermaid-box"})) : null,
+      review.verdict ? card(t("findings", {k: findings.length, r: (review.dropped || []).length}),
+        findings.length ? findings.map(renderFinding) : el("div", {class: "meta", style: "margin:0"}, t("noFindings")),
+        review.verdict_reason ? el("p", {class: "pre", style: "margin:10px 0 0;color:var(--ink-2)"}, A(review.verdict_reason)) : null,
+        (review.dropped || []).length ? el("details", {}, el("summary", {}, t("rejected")), review.dropped.map(renderFinding)) : null) : null,
+      review.verdict ? card(t("tests"), el("div", {class: "kv"},
+        el("div", {class: "k"}, t("related")), el("div", {class: "mono"}, (review.related_tests || []).join("\n") || t("none")),
+        el("div", {class: "k"}, t("targeted")), el("div", {class: "mono"}, (review.targeted_tests || []).join("\n") || t("none")),
+        (review.test_gaps || []).length ? [el("div", {class: "k"}, t("gaps")), el("div", {}, review.test_gaps.map(x => el("div", {}, "• " + A(x))))] : null)) : null,
+      ci.status ? renderCI(c) : null,
+      review.corpus_synthesis ? card(t("history"), el("div", {class: "pre"}, A(review.corpus_synthesis))) : null,
+      review.coverage_notes ? card(t("coverage"), el("div", {class: "pre"}, A(review.coverage_notes)),
+        el("div", {class: "meta"}, (review.runs || []).filter(r => r.label).map(r => chip(r.skipped ? `${r.label} · ${t("skipped")}` :
+          [r.label, r.model && r.model !== "default" ? r.model : r.runner, r.effort && r.effort !== "default" ? r.effort : null,
+           r.account ? r.account.split("@")[0] : null,
+           r.seconds ? Math.round(r.seconds / 6) / 10 + " " + t("min") : null].filter(Boolean).join(" · "), "outline")))) : null,
+      card(t("timeline"), el("ul", {class: "timeline"}, c.events.map(e => el("li", {class: e.kind},
+        el("span", {class: "t"}, ago(e.ts)), tr(e.message),
+        e.data && e.data.url ? [" ", link(e.data.url, "↗")] : null))))));
+  document.getElementById("scrim").classList.add("open");
+  d.classList.add("open");
+  d.scrollTop = keepTop;
+  if (review.mermaid && window.mermaid) {
+    try {
+      // the Chinese diagram is a translation of the labels; if it does not parse, show the English one
+      const source = A(review.mermaid);
+      const {svg} = await mermaid.render("m" + Date.now(), source).catch(err =>
+        source !== review.mermaid ? mermaid.render("m" + Date.now() + "e", review.mermaid) : Promise.reject(err));
+      const box = document.getElementById("mermaid-box");
+      if (box) { box.innerHTML = svg; d.scrollTop = keepTop; }
+    } catch (e) {
+      const box = document.getElementById("mermaid-box");
+      if (box) box.replaceChildren(el("div", {class: "pre mono"}, review.mermaid));
+    }
+  }
+}
+const SEV = {blocker: "bad", major: "bad", minor: "warn", nit: "outline"};
+const VERIFY = {confirmed: "ok", plausible: "warn", rejected: "outline", unverified: "outline"};
+function renderFinding(f) {
+  const verify = f.verify || "unverified";
+  return el("div", {class: "finding"},
+    el("div", {class: "head"}, chip(t("sev")[f.severity] || f.severity, SEV[f.severity]), chip(t("verify")[verify] || verify, VERIFY[verify]),
+      el("span", {}, A(f.title)), f.raised_before ? chip(t("raisedBefore"), "warn") : null,
+      (drawerWaived || []).includes(f.title) ? chip(t("waived"), "ok") : null,
+      f.anchored === false ? chip(t("outside"), "outline") : null),
+    el("div", {class: "path mono"}, `${f.path}:${f.line} · ${f.category}`),
+    el("p", {class: "pre"}, el("b", {}, t("scenario")), A(f.scenario)),
+    f.fix ? el("p", {class: "pre"}, el("b", {}, t("fix")), A(f.fix)) : null,
+    f.verify_reason ? el("p", {class: "pre", style: "color:var(--muted)"}, el("b", {}, t("verifier")), A(f.verify_reason)) : null,
+    el("div", {class: "comment mono"}, f.comment));
+}
+function clsLabel(value) {
+  const [head, ...rest] = String(value || "?").split(", ");
+  return [t("cls")[head] || head, ...rest.map(tr)].join(", ");
+}
+function renderCI(c) {
+  const ci = c.ci, counts = (ci.checks || {}).counts || {};
+  const failures = (ci.blocking || []).concat(ci.unrelated || [], ci.retryable || []);
+  const attempts = ci.attempts || {};
+  return card(t("ciTitle"),
+    el("div", {class: "meta", style: "margin:0 0 8px"},
+      chip(t("ciStatus")[ci.status] || ci.status, ci.status === "green" ? "ok" : ci.status === "failed" ? "bad" : "warn"),
+      ciBar(counts), ciCountText(counts),
+      ci.checks.aggregates_failed ? t("aggregates", {n: ci.checks.aggregates_failed}) : null,
+      ci.merge_state ? t("mergeState", {x: ci.merge_state.toLowerCase()}) : null),
+    failures.map(f => el("div", {class: "finding"},
+      el("div", {class: "head"}, chip(clsLabel(f.classification), f.classification === "related" ? "bad" :
+        String(f.classification).startsWith("unrelated") ? "ok" : "warn"), link(f.url, f.name)),
+      f.evidence ? el("div", {class: "comment mono"}, f.evidence) : null)),
+    ci.triage ? el("p", {class: "pre", style: "color:var(--ink-2)"}, A(ci.triage.summary)) : null,
+    (ci.notes || []).length ? el("div", {}, el("b", {}, t("notes")), ci.notes.map(n => el("div", {class: "meta"}, "· " + tr(n)))) : null,
+    (ci.suggestions || []).length ? el("div", {style: "margin-top:6px"}, ci.suggestions.map(s => el("div", {class: "cmd"},
+      el("code", {}, s.command), chip(t("sendState")[s.state] || s.state, s.state === "done" ? "ok" : s.state === "todo" ? "outline" : "warn"),
+      attempts[s.family] ? chip(t("tries", {n: attempts[s.family], m: 3}), "outline") : null,
+      el("span", {class: "meta", style: "margin:0"}, s.why),
+      ci.targeted && ci.targeted.url && s.family === "rerun-test" ? link(ci.targeted.url, t("targetedLink", {x: ci.targeted.state})) : null,
+      s.state === "todo" && (c.stage === "ready" || state.mode !== "live") ? el("button", {onclick: () => doAction(c.key, "run_suggestion", {event: s.event})}, t("send")) : null)))
+      : null);
+}
+function closeDrawer() {
+  openKey = null;
+  document.getElementById("drawer").classList.remove("open");
+  document.getElementById("scrim").classList.remove("open");
+}
+document.getElementById("scrim").onclick = closeDrawer;
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
+const toggleMode = async () => {
+  const next = state.mode === "live" ? "shadow" : "live";
+  if (next === "live" && !confirm(t("modeConfirm"))) return;
+  await post("/api/mode", {mode: next}); refresh();
+};
+document.getElementById("mode").onclick = toggleMode;
+document.getElementById("mode").onkeydown = e => { if (e.key === "Enter" || e.key === " ") toggleMode(); };
+for (const b of document.querySelectorAll(".seg button")) b.onclick = () => setLang(b.dataset.lang);
+document.getElementById("slack-btn").onclick = () => {
+  const p = document.getElementById("slack-panel"); p.style.display = p.style.display === "block" ? "none" : "block";
+};
+document.getElementById("slack-save").onclick = async () => {
+  const input = document.getElementById("slack-token"), status = document.getElementById("slack-status");
+  status.textContent = t("checking");
+  try { const r = await post("/api/slack-token", {token: input.value}); status.textContent = t("connectedTo", {x: r.team}); }
+  catch (e) { status.textContent = t("failed", {x: e.message}); }
+  input.value = "";
+  refresh();
+};
+document.getElementById("poll-btn").onclick = async () => { await post("/api/poll", {}); toast(t("polling")); setTimeout(refresh, 1500); };
+document.getElementById("add-btn").onclick = async () => {
+  const input = document.getElementById("add-url");
+  try { const r = await post("/api/add", {url: input.value}); toast(t("addedX", {x: r.added.join(", ")})); input.value = ""; }
+  catch (e) { toast(t("failed", {x: e.message})); }
+  refresh();
+};
+applyStatic();
+refresh(); setInterval(refresh, 8000);
+</script>
+</body>
+</html>

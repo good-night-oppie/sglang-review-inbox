@@ -1,0 +1,9 @@
+# your own settings (copy config.example.json)
+config.json
+# runtime state lives in data_dir (~/.cache/review-inbox by default); never commit it
+*.sqlite3*
+slack-tokens
+page-token
+__pycache__/
+*.pyc
+.DS_Store

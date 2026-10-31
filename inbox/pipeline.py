@@ -1,0 +1,1581 @@
+"""Orchestrator: ingest @-mentions, advance each PR card through
+triage → agent review → verification → CI → merge (auto-merge when policy allows).
+
+Only this module writes to GitHub/Slack, and every write is claimed in the
+action ledger keyed by (PR, head, event) so it happens at most once per head."""
+
+import json
+import re
+import subprocess
+import threading
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+
+from . import agent, ci, fixer, github
+from .config import is_live, slack_tokens
+from .db import ACTIVE_STAGES, pr_key
+from .skill import SkillSync, SkillSyncError
+from .slack import Slack, SlackError, dm_status, is_human, mention_record, mention_status
+from .triage import priority, triage
+
+HUNK = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+FOOTER = "\n\n<sub>Agent-assisted pre-review, findings verified against `{head}`.</sub>"
+NO_LOG = "(not fetched: over the 20-log cap)"
+
+
+def evidence_line(failure):
+    """The first line of triage evidence worth showing an author; empty when
+    the agent had no log to read (its placeholders must never be quoted)."""
+    for line in (failure.get("evidence") or "").strip().splitlines():
+        line = line.strip().strip("`").strip()
+        if line and not line.startswith("(") and "not fetched" not in line and "no failure log" not in line.lower():
+            return line
+    return ""
+
+# Slack thread replies: one short English line, sent only for the outcomes
+# listed in policy["slack_outcomes"].
+SLACK_TEXT = {
+    "approved": "Approved {pr}, will merge once CI is green.",
+    "changes": "{pr}: {n} thing(s) to fix, see the PR comments: {url}",
+    "bounce": "{pr}: before review, please {reasons}.",
+    "ci_related": "{pr}: CI failures look related to the change: {names}",
+    "merged": "Merged {pr}, thanks!",
+}
+
+
+def new_side_ranges(diff_text):
+    """Lines GitHub accepts for inline comments: new side of each hunk."""
+    ranges, path = {}, None
+    for line in diff_text.splitlines():
+        if line.startswith("+++ "):
+            path = line[6:] if line.startswith("+++ b/") else None
+        elif line.startswith("@@") and path:
+            match = HUNK.match(line)
+            if match:
+                start, count = int(match.group(1)), int(match.group(2) or 1)
+                if count:
+                    ranges.setdefault(path, []).append([start, start + count - 1])
+    return ranges
+
+
+def anchored(finding, ranges):
+    return any(lo <= finding.get("line", 0) <= hi for lo, hi in ranges.get(finding.get("path"), []))
+
+
+def epoch(iso):
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return 0.0
+
+
+class Pipeline:
+    def __init__(self, config, store):
+        self.config = config
+        self.store = store
+        self.policy = config["policy"]
+        self.repos = set(config["repos"])
+        self.login = config["github_login"]
+        self.executor = ThreadPoolExecutor(max_workers=config["agent"]["max_concurrent"])
+        self.inflight = {}
+        # Chinese translations run one at a time on their own thread, so they
+        # never take a review slot.
+        self.translator = ThreadPoolExecutor(max_workers=1)
+        self.translating = None
+        self.translate_after = {}
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.stopping = threading.Event()
+        self.status = {"started_at": time.time(), "last_tick": 0, "last_error": "", "sources": {}}
+        self.refresh_all = True  # re-check every active card once after a restart
+        self._slack = []
+        self._pr_states = {}  # PR state cache for Slack mentions without a card
+        self.skills = SkillSync(config) if config["agent"]["review_skill"].get("repo") else None
+        self.config["mode"] = store.get_kv("mode", config["mode"])
+
+    # ---- loop -------------------------------------------------------------
+    def start(self):
+        threading.Thread(target=self.loop, name="pipeline", daemon=True).start()
+
+    def loop(self):
+        while not self.stopping.is_set():
+            try:
+                self.tick()
+                self.status["last_error"] = ""
+            except Exception:
+                self.status["last_error"] = traceback.format_exc()[-1500:]
+            self.status["last_tick"] = time.time()
+            self.wake.wait(20)
+            self.wake.clear()
+
+    def tick(self):
+        self.sync_skill()
+        self.poll_sources()
+        refresh_all, self.refresh_all = self.refresh_all, False
+        for card in self.store.list_prs(ACTIVE_STAGES):
+            if card["key"] in self.inflight or not (refresh_all or self.refresh_due(card)):
+                continue
+            try:
+                self.advance(card)
+            except Exception as exc:  # one bad card must not stall the others
+                self.store.add_event(card["key"], "error", f"refresh failed: {str(exc)[:500]}")
+                self.store.update_pr(card["key"], refreshed_at=time.time())
+        self.announce_recent_merges()
+        self.queue_translation()
+
+    def sync_skill(self):
+        """Keep the skill clone current even when no review runs: your own
+        Codex/Claude skill links point at it too."""
+        if not self.skills:
+            return
+        try:
+            _, commit = self.skills.ensure()
+            self.status["skill"] = {"ok": True, "commit": commit[:12]}
+        except SkillSyncError as exc:
+            self.status["skill"] = {"ok": False, "note": str(exc)[:300]}
+
+    def refresh_due(self, card):
+        if card["stage"] == "new" or card["decision"].get("refresh"):
+            return True
+        if card["stage"] == "error":  # retried forever: 5 min, doubling, at most hourly
+            interval = min(300 * 2 ** max(card["decision"].get("error_count", 1) - 1, 0), 3600)
+            return time.time() - (card["refreshed_at"] or 0) >= interval
+        interval = self.config["refresh_seconds"][
+            "waiting_author" if card["stage"] == "needs_author" else "active"]
+        return time.time() - (card["refreshed_at"] or 0) >= interval
+
+    # ---- Chinese view ------------------------------------------------------
+    @staticmethod
+    def agent_texts(card):
+        """English text the agent wrote for this card (not code, logs, PR titles,
+        people's messages or the GitHub comment drafts)."""
+        review, texts = card["review"] or {}, []
+        texts += [review.get(name) for name in ("summary", "verdict_reason", "corpus_synthesis", "coverage_notes",
+                                                "mermaid")]
+        texts += list(review.get("test_gaps") or [])
+        for finding in (review.get("findings") or []) + (review.get("dropped") or []):
+            texts += [finding.get(name) for name in ("title", "scenario", "fix", "verify_reason")]
+        texts.append(((card["ci"] or {}).get("triage") or {}).get("summary"))
+        return [text for text in dict.fromkeys(texts) if isinstance(text, str) and text.strip()]
+
+    TRANSLATE_ORDER = {"ready": 0, "needs_author": 1, "approved": 2, "queued": 3, "reviewing": 3}
+
+    def queue_translation(self):
+        """Translate one card's missing agent text per tick, cards that need you first."""
+        if not self.config["agent"].get("translate_zh", True) or self.translating:
+            return
+        now = time.time()
+        cards = sorted(self.store.list_prs(), key=lambda c: (self.TRANSLATE_ORDER.get(c["stage"], 4), -c["updated_at"]))
+        for card in cards:
+            if self.translate_after.get(card["key"], 0) > now:
+                continue
+            texts = self.agent_texts(card)
+            missing = [text for text in texts if text not in self.store.translations(texts)]
+            if missing:
+                self.translating = card["key"]
+                self.translator.submit(self.job_translate, card["key"], missing)
+                return
+
+    def job_translate(self, key, texts):
+        try:
+            for i in range(0, len(texts), 40):
+                self.store.put_translations(agent.translate_zh(self.config, texts[i:i + 40]))
+            self.translate_after[key] = time.time() + 600  # anything the model skipped: later
+        except Exception as exc:
+            self.translate_after[key] = time.time() + 1800
+            self.status["translate_error"] = f"{key}: {self.agent_blocked(exc) or str(exc)[:300]}"
+        finally:
+            self.translating = None
+            self.wake.set()
+
+    def kick(self, reset_sources=False):
+        if reset_sources:
+            for source in self.status["sources"].values():
+                source["at"] = 0
+            self.refresh_all = True
+        self.wake.set()
+
+    # ---- sources ----------------------------------------------------------
+    def poll_sources(self):
+        pollers = {"slack": self.poll_slack, "slack_inbox": self.poll_slack_inbox,
+                   "github_mentions": self.poll_github_mentions, "github_assigned": self.poll_github_assigned,
+                   "github_review_requested": self.poll_review_requested}
+        for name, poller in pollers.items():
+            source_config = self.config["sources"][name]
+            state = self.status["sources"].setdefault(name, {"at": 0})
+            if not source_config["enabled"]:
+                state.update(ok=False, off=True, note="off")
+                continue
+            state["off"] = False
+            if time.time() - state["at"] < source_config["poll_seconds"]:
+                continue
+            state["at"] = time.time()
+            try:
+                found = poller(source_config)
+                state.update(ok=True, note=f"{found} new", checked=time.time())
+            except Exception as exc:
+                state.update(ok=False, note=str(exc)[:300], checked=time.time())
+
+    def slack_clients(self):
+        tokens = slack_tokens(self.config)
+        if not tokens:
+            slack = self.config["sources"]["slack"]
+            raise RuntimeError(f"no Slack token ({slack['token_file']} or ${slack['token_env']})")
+        if [client.token for client in self._slack] != tokens:
+            self._slack = [Slack(token) for token in tokens]
+        return self._slack
+
+    def slack_teams(self):
+        """Workspace ids of the tokens connected right now."""
+        try:
+            return {client.identity() and client.team_id for client in self.slack_clients()}
+        except Exception:
+            return set()
+
+    def slack_for(self, team_id):
+        for client in self.slack_clients():
+            client.identity()
+            if client.team_id == team_id:
+                return client
+        raise RuntimeError(f"no token for workspace {team_id}")
+
+    def poll_slack(self, source_config):
+        """Only @-mentions that carry a PR link and ask for review become cards;
+        every other mention is listed under Slack and never answered."""
+        intent = re.compile(source_config["review_intent"], re.I)
+        fyi = re.compile(source_config["fyi_pattern"], re.I)
+        fresh_after = time.time() - source_config["review_max_age_days"] * 86400
+        added = 0
+        for client in self.slack_clients():
+            uid = client.identity()
+            for query in source_config["queries"]:
+                for match in client.search(query.replace("{uid}", uid), source_config["lookback_days"]):
+                    record = mention_record(match, client.team_id)
+                    if match.get("user") == uid or self.store.has_mention(record["id"]):
+                        continue
+                    if match.get("bot_id") or not (record["text"] or "").strip():
+                        continue  # integrations and empty bot posts are not requests
+                    own = record["text"]
+                    refs = github.find_pr_refs(own, self.repos)
+                    if not refs and source_config["follow_threads"] and record["thread_ts"] != match.get("ts"):
+                        try:
+                            parent = client.thread_parent_text(record["channel_id"], record["thread_ts"])
+                        except Exception:
+                            parent = ""
+                        refs = github.find_pr_refs(parent, self.repos)
+                    asks = bool(intent.search(own))
+                    readable = client.render(own)
+                    if refs and asks and record["ts"] >= fresh_after:
+                        record.update(kind="review", status="agent")
+                    elif refs and asks:
+                        record.update(kind="review-old", status="pending")  # too old to act on unasked
+                    elif fyi.search(re.sub(r"<@[^>]+>", "", own).strip()):
+                        record.update(kind="fyi", status="pending")
+                    else:
+                        record.update(kind="pr-other" if refs else "other", status="pending")
+                    record["pr_keys"] = [pr_key(repo, number) for repo, number in refs] if refs else []
+                    record["text"] = readable
+                    self.store.add_mention(record)
+                    added += 1
+                    if record["kind"] == "review":
+                        self.register_slack_request(client, record, refs)
+            for channel in source_config.get("watch_channels") or []:
+                added += self.poll_watched_channel(client, uid, channel, source_config, fyi)
+        return added
+
+    def poll_watched_channel(self, client, uid, channel, source_config, fyi):
+        """PRs posted in a team PR channel are yours to review even without an
+        @-mention, unless the post names someone else or someone else already
+        reviews the PR on GitHub. Posts that @-mention you go through the
+        regular mention flow."""
+        fresh_after = time.time() - source_config["watch_max_age_days"] * 86400
+        added = 0
+        for match in client.search(f"in:#{channel}", source_config["watch_max_age_days"]):
+            record = mention_record(match, client.team_id)
+            text = record["text"] or ""
+            if self.store.has_mention(record["id"]) or match.get("user") == uid or not is_human(match):
+                continue
+            refs = github.find_pr_refs(text, self.repos)
+            if not refs or record["ts"] < fresh_after or f"<@{uid}>" in text:
+                continue
+            if re.search(r"<@\w+|<!subteam\^", text) or fyi.search(text):
+                refs = []  # addressed to someone else
+            else:
+                refs = [ref for ref in refs if not self.reviewed_by_others(*ref)]
+            record.update(kind="review" if refs else "channel-other", status="agent" if refs else "ignored",
+                          pr_keys=[pr_key(*ref) for ref in refs], text=client.render(text))
+            self.store.add_mention(record)
+            added += 1
+            if refs:
+                self.register_slack_request(client, record, refs)
+        return added
+
+    def reviewed_by_others(self, repo, number):
+        """Someone other than you, the author and bots already reviewed it."""
+        try:
+            reviews = github.gh_json(["api", "-X", "GET", f"repos/{repo}/pulls/{number}/reviews",
+                                      "-f", "per_page=100"]) or []
+            author = (github.gh_json(["api", f"repos/{repo}/pulls/{number}"]) or {}).get("user", {}).get("login")
+        except github.GitHubError:
+            return False
+        return any(r.get("user", {}).get("login") not in (self.login, author)
+                   and not r.get("user", {}).get("login", "").endswith("[bot]") for r in reviews)
+
+    def register_slack_request(self, client, record, refs):
+        for repo, number in refs:
+            self.store.ensure_pr(repo, number, requester={
+                "id": record["id"], "source": "slack", "author": record["author"],
+                "user_id": record.get("user_id", ""),
+                "team_id": client.team_id, "channel": record["channel"],
+                "channel_id": record["channel_id"], "thread_ts": record["thread_ts"],
+                "permalink": record["permalink"], "text": record["text"][:300], "ts": record["ts"]})
+
+    def poll_slack_inbox(self, source_config):
+        """What you still owe a reply: @-mentions you have not answered or
+        reacted to, and DMs where the other side spoke last. Review requests
+        found in DMs go to the pipeline like @-mentions do."""
+        since = time.time() - source_config["lookback_days"] * 86400
+        intent = re.compile(self.config["sources"]["slack"]["review_intent"], re.I)
+        changed = 0
+        for client in self.slack_clients():
+            me = client.identity()
+            for item in self.store.recent_mentions(300, statuses=("pending",), since=since):
+                if item["source"] != "slack" or item["team_id"] != client.team_id or item["id"].startswith("slackdm:"):
+                    continue
+                status = self.mention_handled(client, me, item)
+                if status != "pending":
+                    self.store.set_mention_status(item["id"], status)
+                    changed += 1
+            for conv in self.recent_dms(client, source_config):
+                try:
+                    messages = client.history(conv["id"], since, limit=30)
+                    messages = self.with_thread_replies(client, conv, messages, since)
+                except SlackError:
+                    continue
+                item_id = f"slackdm:{client.team_id}:{conv['id']}"
+                state = dm_status(me, messages, group=not conv.get("is_im"))
+                if state is None:
+                    self.dm_review_asks(client, me, conv, messages, intent)
+                    if self.store.has_mention(item_id):
+                        self.store.upsert_dm({"id": item_id, "ts": 0, "status": "replied", "text": "",
+                                              "permalink": "", "author": ""})
+                    continue
+                asked = self.dm_review_asks(client, me, conv, messages, intent)
+                status, latest, count = state
+                if not conv.get("is_im") and self.store.has_mention(
+                        f"slack:{client.team_id}:{conv['id']}:{latest['ts']}"):
+                    continue  # a group-DM @ already listed under mentions
+                author = client.user_name(latest.get("user", ""))
+                raw = latest.get("text", "")
+                refs = github.find_pr_refs(raw, self.repos)
+                if latest["ts"] in asked:
+                    status = "agent"
+                self.store.upsert_dm({
+                    "id": item_id, "source": "slack", "kind": "dm", "conv": "dm", "team_id": client.team_id,
+                    "channel_id": conv["id"], "channel": "DM" if conv.get("is_im") else (conv.get("name") or "group DM"),
+                    "author": author, "text": client.render(raw), "ts": float(latest["ts"]),
+                    "permalink": client.permalink(conv["id"], latest["ts"]), "status": status, "count": count,
+                    "pr_keys": [pr_key(*ref) for ref in refs] if status == "agent" else []})
+                changed += 1
+        self.resolve_closed_pr_mentions(since)
+        for client in self.slack_clients():
+            changed += self.follow_mention_threads(client, client.identity(), intent)
+            changed += self.promote_missed_asks(client, intent)
+        return changed
+
+    def promote_missed_asks(self, client, intent):
+        """Mentions stored as "not an ask" or "too old" that the current rules
+        call a review ask, and whose PRs are still open, go to the agent."""
+        slack = self.config["sources"]["slack"]
+        fresh_after = time.time() - slack["review_max_age_days"] * 86400
+        fyi = re.compile(slack["fyi_pattern"], re.I)
+        promoted = 0
+        for item in self.store.recent_mentions(300, statuses=("pending",), since=fresh_after):
+            if item["team_id"] != client.team_id or item["kind"] not in ("pr-other", "review-old"):
+                continue
+            text = item["text"] or ""
+            if not item["pr_keys"] or not intent.search(text) or fyi.search(re.sub(r"@\S+", "", text).strip()):
+                continue
+            if any(self.pr_state(key) != "OPEN" for key in item["pr_keys"]):
+                continue
+            refs = [tuple(key.split("#")) for key in item["pr_keys"]]
+            self.store.set_mention_status(item["id"], "agent", "review ask (re-read with the current rules)")
+            self.register_slack_request(client, dict(item, thread_ts=item["thread_ts"] or f"{item['ts']:.6f}"),
+                                        [(repo, int(number)) for repo, number in refs])
+            promoted += 1
+        return promoted
+
+    def follow_mention_threads(self, client, me, intent):
+        """A later reply in a thread that @-mentioned you, carrying a PR link
+        and asking for a review without naming someone else, is an ask to you
+        too; the outcome goes back into that thread."""
+        slack = self.config["sources"]["slack"]
+        fresh_after = time.time() - slack["review_max_age_days"] * 86400
+        threads = {}
+        for item in self.store.recent_mentions(300, since=fresh_after):
+            if item["source"] == "slack" and item["team_id"] == client.team_id and item["thread_ts"] \
+                    and not item["id"].startswith("slackdm:") and item["conv"] == "channel":
+                threads.setdefault((item["channel_id"], item["thread_ts"]), item)
+        added = 0
+        for (channel_id, thread_ts), item in threads.items():
+            try:
+                replies = client.replies(channel_id, thread_ts)
+            except SlackError:
+                continue
+            for message in replies:
+                raw, ts = message.get("text", ""), float(message.get("ts", 0))
+                record_id = f"slack:{client.team_id}:{channel_id}:{message.get('ts')}"
+                if ts <= item["ts"] or ts < fresh_after or message.get("user") == me or not is_human(message):
+                    continue
+                if self.store.has_mention(record_id) or re.search(r"<@\w+|<!subteam\^", raw):
+                    continue
+                refs = github.find_pr_refs(raw, self.repos)
+                if not refs or not intent.search(raw):
+                    continue
+                record = {"id": record_id, "source": "slack", "team_id": client.team_id, "conv": "channel",
+                          "user_id": message.get("user", ""), "channel": item["channel"], "channel_id": channel_id,
+                          "author": client.user_name(message.get("user", "")), "text": client.render(raw),
+                          "permalink": client.permalink(channel_id, message["ts"], thread_ts), "ts": ts,
+                          "thread_ts": thread_ts, "kind": "review", "status": "agent",
+                          "pr_keys": [pr_key(*ref) for ref in refs]}
+                self.store.add_mention(record)
+                self.register_slack_request(client, record, refs)
+                added += 1
+        return added
+
+    def recent_dms(self, client, source_config):
+        """DMs with recent messages to you (Slack search `to:me`, which also
+        finds conversations far down Slack's priority order) plus the few
+        Slack ranks highest."""
+        found = {}
+        for match in client.search("to:me", source_config["lookback_days"]):
+            channel = match.get("channel") or {}
+            if (channel.get("is_im") or channel.get("is_mpim")) and channel.get("id"):
+                found.setdefault(channel["id"], {"id": channel["id"], "is_im": bool(channel.get("is_im")),
+                                                 "is_mpim": bool(channel.get("is_mpim")), "name": channel.get("name")})
+        for conv in client.dm_conversations(source_config["dm_conversations"]):
+            found.setdefault(conv["id"], conv)
+        return list(found.values())
+
+    @staticmethod
+    def with_thread_replies(client, conv, messages, since):
+        """Top-level DM messages plus replies in their recent threads, newest
+        first, so a question asked inside a DM thread is not missed."""
+        replies = []
+        for message in messages:
+            if message.get("reply_count") and float(message.get("latest_reply") or 0) >= since:
+                replies += [r for r in client.replies(conv["id"], message["ts"]) if r.get("ts") != message["ts"]]
+        return sorted(messages + replies, key=lambda m: float(m.get("ts", 0)), reverse=True)
+
+    def dm_review_asks(self, client, me, conv, messages, intent):
+        """Every fresh DM message from someone else that carries a PR link is a
+        review ask (in a group DM it must ask you or @ you); each gets its own
+        request, so the outcome reply lands under that message. Returns the
+        ts of the messages handed to the agent."""
+        slack = self.config["sources"]["slack"]
+        fresh_after = time.time() - slack["review_max_age_days"] * 86400
+        fyi = re.compile(slack["fyi_pattern"], re.I)
+        asked = set()
+        for message in messages:
+            raw = message.get("text", "")
+            if message.get("user") == me or not is_human(message) or float(message.get("ts", 0)) < fresh_after:
+                continue
+            refs = github.find_pr_refs(raw, self.repos)
+            if not refs or fyi.search(re.sub(r"<@[^>]+>", "", raw).strip()):
+                continue
+            if not conv.get("is_im") and not (intent.search(raw) or f"<@{me}>" in raw):
+                continue
+            self.register_slack_request(client, {
+                "id": f"slack:{client.team_id}:{conv['id']}:{message['ts']}",
+                "author": client.user_name(message.get("user", "")), "user_id": message.get("user", ""),
+                "channel": "DM", "channel_id": conv["id"], "thread_ts": message.get("thread_ts") or message["ts"],
+                "permalink": client.permalink(conv["id"], message["ts"]),
+                "text": client.render(raw), "ts": float(message["ts"])}, refs)
+            asked.add(message["ts"])
+        return asked
+
+    def resolve_closed_pr_mentions(self, since, budget=30):
+        """A pending mention whose PRs are all merged or closed is no longer owed."""
+        for item in self.store.recent_mentions(300, statuses=("pending",), since=since):
+            if item["source"] != "slack" or not item["pr_keys"]:
+                continue
+            states = [self.pr_state(key) for key in item["pr_keys"]]
+            budget -= sum(state is None for state in states)
+            if states and all(state in ("MERGED", "CLOSED") for state in states):
+                self.store.set_mention_status(item["id"], "resolved", "PR merged or closed")
+            if budget <= 0:
+                break
+
+    def pr_state(self, key):
+        card = self.store.get_pr(key)
+        if card and card["refreshed_at"]:
+            return card["state"]
+        cached = self._pr_states.get(key)
+        if cached and time.time() - cached[1] < 3600:
+            return cached[0]
+        repo, number = key.split("#")
+        try:
+            state = github.gh_json(["pr", "view", number, "--repo", repo, "--json", "state"])["state"]
+        except (github.GitHubError, TypeError, KeyError):
+            return None
+        self._pr_states[key] = (state, time.time())
+        return state
+
+    def mention_handled(self, client, me, item):
+        ts = f"{item['ts']:.6f}"
+        thread = item["thread_ts"] or ts
+        try:
+            messages = client.replies(item["channel_id"], thread)
+            if thread == ts:  # top-level mention: an answer may also be a plain channel message
+                messages += [m for m in client.history(item["channel_id"], item["ts"], limit=20)
+                             if float(m.get("ts", 0)) - item["ts"] < 6 * 3600]
+        except SlackError:
+            return "pending"
+        return mention_status(item["ts"], me, messages)
+
+    ONCE_PER_PR = ("approved", "merged")  # a new head (e.g. an agent fix) is no news to the asker
+
+    def slack_reply(self, key, head, outcome, **values):
+        """Tell every Slack requester of this PR the current outcome, once per
+        (requester, head, outcome), and "approved" / "merged" only once per PR;
+        safe to call on every refresh."""
+        if not (is_live(self.config) and self.policy["slack_report"]):
+            return
+        if outcome not in self.policy["slack_outcomes"]:
+            return
+        card = self.store.get_pr(key)
+        pr = f"{card['repo'].split('/')[-1]}#{card['number']}"
+        teams = self.slack_teams()
+        for requester in card["requesters"]:
+            if requester.get("source") != "slack" or not requester.get("thread_ts"):
+                continue
+            if requester.get("team_id") not in teams:
+                continue  # that workspace is no longer connected
+            event, claim_head, link = f"slack:{outcome}", head, f"<{card['url']}|{pr}>"
+            thread = f"slackthread:{requester.get('team_id')}:{requester['channel_id']}:{requester['thread_ts']}"
+            done = [a for owner in (requester["id"], thread) for a in self.store.actions(owner)
+                    if a["event"] == event and a["phase"] == "done"]
+            if outcome in self.ONCE_PER_PR and done:
+                continue
+            if any(a["head"] == head for a in done):
+                continue  # another ask in this thread already got this outcome
+            if outcome == "merged":
+                # one closing line per ask, once every PR it named is closed
+                link, claim_head = self.merged_in_ask(requester, key), "-"
+                if not link:
+                    continue
+            if not self.store.claim_action(thread, claim_head, event):
+                continue
+            text = SLACK_TEXT[outcome].format(pr=link, login=self.login, **values)
+            # No @: a reply in the requester's own thread already notifies them.
+            text = self.policy["slack_prefix"].format(login=self.login) + text
+            try:
+                self.slack_for(requester["team_id"]).reply(requester["channel_id"], requester["thread_ts"], text)
+            except Exception as exc:
+                self.store.finish_action(thread, claim_head, event, False)
+                self.store.add_event(key, "error", f"Slack reply failed: {exc}")
+                continue
+            self.store.finish_action(thread, claim_head, event, True)
+            self.store.add_event(key, "action", f"Slack reply ({outcome}): {text}",
+                                 {"url": requester.get("permalink")})
+
+    def merged_in_ask(self, requester, key):
+        """Slack links of the merged PRs one ask named, or "" while any of
+        them is still open (or none got merged)."""
+        mention = self.store.get_mention(requester["id"])
+        cards = [self.store.get_pr(k) for k in (mention or {}).get("pr_keys") or [key]]
+        if any(c is None or c["state"] == "OPEN" for c in cards):
+            return ""
+        links = [f"<{c['url']}|{c['repo'].split('/')[-1]}#{c['number']}>" for c in cards if c["state"] == "MERGED"]
+        return " and ".join([", ".join(links[:-1]), links[-1]] if len(links) > 1 else links)
+
+    def announce_recent_merges(self, days=3):
+        """Slack asks whose PRs you merged yourself (by hand or through the
+        agent) get their closing line, also when the merge happened outside
+        this pipeline."""
+        if not (is_live(self.config) and self.policy["slack_report"]):
+            return
+        for card in self.store.list_prs(("closed",)):
+            if card["stage_reason"] != "merged" or time.time() - (card["updated_at"] or 0) > days * 86400:
+                continue
+            if not any(r.get("source") == "slack" for r in card["requesters"]):
+                continue
+            merged_by = (card["meta"] or {}).get("merged_by")
+            if merged_by is None:
+                try:
+                    merged_by = ((github.gh_json(["pr", "view", str(card["number"]), "--repo", card["repo"],
+                                                  "--json", "mergedBy"]) or {}).get("mergedBy") or {}).get("login", "")
+                except github.GitHubError:
+                    continue
+                self.store.update_pr(card["key"], meta=dict(card["meta"] or {}, merged_by=merged_by))
+            if merged_by == self.login:
+                self.slack_reply(card["key"], card["head_sha"], "merged")
+
+    def _github_search(self, qualifier, source, source_config):
+        since = (datetime.now(timezone.utc) - timedelta(days=source_config["lookback_days"])).strftime("%Y-%m-%d")
+        added = 0
+        for repo in self.repos:
+            items = github.search_issues(
+                f"repo:{repo} is:pr is:open {qualifier}:{self.login} updated:>={since} -author:{self.login}")
+            for item in items:
+                card, created = self.store.ensure_pr(repo, item["number"], requester={
+                    "id": f"{source}:{repo}#{item['number']}", "source": source,
+                    "author": (item.get("user") or {}).get("login", ""), "permalink": item.get("html_url", ""),
+                    "text": item.get("title", ""), "ts": time.time()})
+                added += created
+                if not created and card and epoch(item.get("updated_at", "")) > (card["refreshed_at"] or 0):
+                    self.store.update_pr(card["key"], decision=dict(card["decision"], refresh=True))
+        return added
+
+    def poll_github_mentions(self, source_config):
+        return self._github_search("mentions", "github-mention", source_config)
+
+    def poll_github_assigned(self, source_config):
+        return self._github_search("assignee", "github-assigned", source_config)
+
+    def poll_review_requested(self, source_config):
+        return self._github_search("review-requested", "github-review-request", source_config)
+
+    # ---- per-PR state machine -------------------------------------------
+    def advance(self, card):
+        key = card["key"]
+        snap = github.fetch_pr(card["repo"], card["number"])
+        head = snap["headRefOid"]
+        mine = [r for r in snap.get("latestReviews") or [] if (r.get("author") or {}).get("login") == self.login]
+        if card["head_sha"] and card["head_sha"] != head:
+            self.store.add_event(key, "push", f"new push: {card['head_sha'][:8]} → {head[:8]}")
+        decision = dict(card["decision"], refresh=False)
+        self.store.update_pr(
+            key, title=snap["title"], author=(snap.get("author") or {}).get("login", ""),
+            url=snap["url"], state=snap["state"], draft=snap["isDraft"], head_sha=head,
+            base_ref=snap["baseRefName"], additions=snap["additions"], deletions=snap["deletions"],
+            changed_files=snap["changedFiles"], labels=[l["name"] for l in snap.get("labels") or []],
+            mergeable=snap.get("mergeable") or "", review_decision=snap.get("reviewDecision") or "",
+            meta={"merge_state": snap.get("mergeStateStatus"), "created_at": snap.get("createdAt"),
+                  "updated_at": snap.get("updatedAt"),
+                  "my_review": mine[0].get("state") if mine else ""},
+            decision=decision, refreshed_at=time.time())
+        card = self.store.get_pr(key)
+
+        if snap["state"] != "OPEN":
+            merged_by = (snap.get("mergedBy") or {}).get("login", "")
+            self.store.update_pr(key, meta=dict(self.store.get_pr(key)["meta"] or {}, merged_by=merged_by))
+            self.store.set_stage(key, "closed", "merged" if snap["state"] == "MERGED" else "closed")
+            if snap["state"] == "MERGED" and merged_by == self.login:  # yours, by hand or by the agent
+                self.slack_reply(key, head, "merged")
+            return
+        if card["author"] == self.login:
+            self.store.set_stage(key, "dismissed", "your own PR")
+            return
+
+        result = triage(snap, self.policy, requested_by_human=bool(card["requesters"]))
+        self.store.update_pr(key, triage=result, tier=result["tier"], priority=priority(card, result))
+        # Every PR is followed until it is merged: replies are read and answered
+        # at any stage, against the current review (a new push is reviewed first).
+        if (not card["review"] or card["review_head"] == head) and self.answer_replies(card, snap):
+            return
+        # Someone asking you in Slack (or you adding it) wants a review even of a draft.
+        asked = any(r.get("source") in ("slack", "manual") for r in card["requesters"])
+        gates = [g for g in result["gates"] if g["kind"] == "author" and not (g["id"] == "draft" and asked)]
+        if gates and decision.get("force_review_head") != head:
+            self.store.set_stage(key, "needs_author", "; ".join(g["reason"] for g in gates))
+            told = [g for g in gates if g["tell_author"]]
+            if told:
+                # Keyed by which gates fired, so a conflict that appears after a
+                # missing-tests note on the same head still gets its own reminder.
+                self.author_note(key, head, "github:bounce:" + "+".join(sorted(g["id"] for g in told)),
+                                 "To move this forward, please:\n" + "\n".join(f"- {g['ask']}" for g in told))
+                self.slack_reply(key, head, "bounce", reasons="; ".join(g["ask"] for g in told))
+            return
+
+        if card["review_head"] != head or not card["review"]:
+            used = self.store.count_events("review", time.time() - 86400)
+            if used >= self.config["agent"]["daily_review_limit"]:
+                self.store.set_stage(key, "queued", f"daily agent-review budget used ({used}/24h), queued")
+                return
+            self.store.set_stage(key, "queued", f"waiting for agent review ({result['tier']})")
+            self.submit(key, self.job_review, key, snap, result["tier"])
+            return
+
+        review = card["review"]
+        waived = set(card["decision"].get("waived_findings") or [])
+        verdict = agent.effective_verdict({"verdict": review.get("agent_verdict", review["verdict"])},
+                                          [f for f in review["findings"] if f["title"] not in waived])
+        if verdict != review["verdict"]:
+            review = dict(review, verdict=verdict)
+            self.store.update_pr(key, review=review)
+        approved = self.approved_this_head(card, head)
+        if decision.get("approve_head") == head and not approved:
+            self.approve(key, note="", by="you, in a GitHub comment")  # you said LGTM on the PR
+            approved = True
+        if decision.get("needs_you_head") == head and not approved:
+            self.set_ready(card, "look", decision.get("needs_you_reason") or "the author disputes a finding")
+            return
+        if decision.get("waiting_author_head") == head and not approved:
+            # You sent the findings and handed it to the author: hold it until they push.
+            self.store.set_stage(key, "needs_author", "you confirmed the findings and sent them to the author")
+            return
+        if review["verdict"] == "changes_needed" and not approved:
+            confirmed = [f for f in review["findings"] if f["title"] not in waived and agent.is_risk(f)
+                         and f["severity"] in ("blocker", "major") and f["verify"] == "confirmed"]
+            issues = [{"id": f"F{i + 1}", "title": f["title"], "path": f["path"], "line": f["line"],
+                       "scenario": f["scenario"], "evidence": f.get("evidence", ""), "suggested_fix": f.get("fix", "")}
+                      for i, f in enumerate(confirmed)]
+            if self.try_fix(card, snap, "findings", issues):
+                return
+            published = self.findings_review(key, head)
+            if not published and is_live(self.config) and self.policy["auto_publish_findings"]:
+                published = self.publish_findings(key, by="agent")
+            self.store.set_stage(key, "needs_author", "blocking issues confirmed" + (", posted on the PR, waiting for the author" if published else ""))
+            if published:
+                blocking = [f for f in review["findings"] if f["severity"] in ("blocker", "major")]
+                self.slack_reply(key, head, "changes", n=len(blocking), url=published.get("url", card["url"]))
+            return
+
+        # Approval is about the code alone: it never waits for CI or a clean merge.
+        if not approved:
+            if review["verdict"] == "needs_human" or card["tier"] not in self.auto_approve_tiers():
+                self.set_ready(card, "look", "needs your look: " + (review.get("verdict_reason") or "high-risk change"))
+            elif self.auto_approve_allowed():
+                self.approve(key, by="agent")
+                approved = True
+            elif is_live(self.config) and self.policy["auto_approve"]:
+                self.store.set_stage(key, "queued", "no blocking issues; daily approval budget used, "
+                                     "approving when it frees up")
+                return
+            else:
+                self.set_ready(card, "approve", "no blocking issues, ready to approve")
+        # CI runs either way so the evidence is ready; it only decides merge readiness.
+        self.handle_ci(self.store.get_pr(key), snap, merge_gate=approved)
+
+    # ---- answering replies on the agent's review comments --------------------
+    def answer_replies(self, card, snap):
+        if not (is_live(self.config) and self.policy["auto_discuss"]):
+            return False
+        replies = self.open_replies(card)
+        if not replies:
+            return False
+        self.store.set_stage(card["key"], "reviewing", f"agent is answering {len(replies)} reply(ies) on the PR")
+        self.submit(card["key"], self.job_discuss, card["key"], snap, replies)
+        return True
+
+    def findings_review_any(self, key):
+        return any(a["event"] == "review:findings" and a["phase"] == "done" for a in self.store.actions(key))
+
+    def agent_comment_ids(self, key):
+        """GitHub comment ids the agent posted on this PR (from the ledger)."""
+        ids = set()
+        for action in self.store.actions(key):
+            ids |= {int(x) for x in re.findall(r"(?:issuecomment-|discussion_r)(\d+)", json.dumps(action["result"] or {}))}
+        return ids
+
+    def open_replies(self, card):
+        """What the PR wants an answer to: replies in review threads you
+        started, and the author's PR comments once you have said something on
+        the PR (or that @-mention you), newer than your last word there and
+        not handled yet. Slash commands are not replies."""
+        since = datetime.fromtimestamp(time.time() - 14 * 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            items = github.discussion(card["repo"], card["number"], since)
+        except github.GitHubError:
+            return []
+        answered = {a["event"].split(":", 1)[1] for a in self.store.actions(card["key"]) if a["event"].startswith("reply:")}
+        agent_ids = self.agent_comment_ids(card["key"])
+        first_seen = datetime.fromtimestamp(card["first_seen"] or 0, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for c in items:  # you typing on GitHub yourself, as opposed to the agent posting as you
+            c["maintainer"] = (c["author"] == self.login and c["id"] not in agent_ids
+                               and (c["kind"] == "issue" or c["in_reply_to"] is not None))
+        mine = {c["id"] for c in items if c["author"] == self.login and c["kind"] == "review"}
+        last_mine, mention = {}, f"@{self.login}".lower()
+        for c in items:
+            if c["author"] == self.login:
+                last_mine[c["in_reply_to"] or c["id"] if c["kind"] == "review" else "issue"] = c["created_at"]
+        found = []
+        for c in items:
+            if str(c["id"]) in answered:
+                continue
+            if c["maintainer"]:
+                # your own word is a decision: follow it (never answered)
+                if c["created_at"] >= first_seen and not c["body"].lstrip().startswith("/"):
+                    found.append(c)
+                continue
+            if c["author"] in (self.login, "") or c["author"].endswith("[bot]"):
+                continue
+            if c["kind"] == "review" and c["in_reply_to"] in mine:
+                if c["created_at"] > last_mine.get(c["in_reply_to"], ""):
+                    found.append(c)
+            elif c["kind"] == "issue" and c["author"] == card["author"] and not c["body"].lstrip().startswith("/"):
+                talked = "issue" in last_mine or bool(mine)
+                if (talked or mention in c["body"].lower()) and c["created_at"] > last_mine.get("issue", ""):
+                    found.append(c)
+        return found
+
+    def job_discuss(self, key, snap, replies):
+        card = self.store.get_pr(key)
+        head = snap["headRefOid"]
+        waived = set(card["decision"].get("waived_findings") or [])
+        findings = [{"title": f["title"], "severity": f["severity"], "path": f["path"], "line": f["line"],
+                     "scenario": f["scenario"], "comment": f["comment"]}
+                    for f in (card["review"] or {}).get("findings") or [] if f["title"] not in waived]
+        since = datetime.fromtimestamp(time.time() - 14 * 86400, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        items = github.discussion(card["repo"], card["number"], since)
+        threads = []
+        for reply in replies:
+            if reply["kind"] == "review":
+                thread = [c for c in items if reply["in_reply_to"] in (c["id"], c["in_reply_to"])
+                          and c["created_at"] <= reply["created_at"]]
+            else:
+                thread = [c for c in items if c["kind"] == "issue" and c["created_at"] <= reply["created_at"]][-4:]
+            threads.append({"comment_id": str(reply["id"]), "path": reply.get("path"), "line": reply.get("line"),
+                            "from_maintainer": bool(reply.get("maintainer")),
+                            "conversation": [{"author": c["author"], "body": c["body"][:3000]} for c in thread]})
+        workspace = agent.Workspace(self.config, card["repo"], card["number"], head, snap["baseRefName"])
+        try:
+            workspace.prepare(snap)
+            result, _ = agent.discuss(self.config, workspace, findings, threads)
+        finally:
+            workspace.cleanup()
+        by_id = {str(r["id"]): r for r in replies}
+        maintainer, followed = [], []
+        ci_waived = set(card["decision"].get("ci_waived") or [])
+        for answer in result.get("answers", []):
+            reply = by_id.get(answer["comment_id"])
+            if not reply:
+                continue
+            event = f"reply:{reply['id']}"
+            if reply.get("maintainer"):  # your instruction: follow it, never answer it
+                if self.store.claim_action(key, head, event):
+                    self.store.finish_action(key, head, event, True, {"decision": answer["decision"], "by": "you"})
+                    self.store.add_event(key, "decision", f"following your GitHub comment ({answer['decision']}): "
+                                         + reply["body"].strip()[:160], {"url": reply["url"]})
+                    followed.append(answer)
+                continue
+            if answer["decision"] == "none" or not answer["reply"].strip():
+                if self.store.claim_action(key, head, event):  # a thanks or a status update: read, no answer
+                    self.store.finish_action(key, head, event, True, {"decision": "none"})
+                continue
+            if not self.store.claim_action(key, head, event):
+                continue
+            body = answer["reply"].strip()
+            try:
+                if reply["kind"] == "review":
+                    url = github.reply_in_thread(card["repo"], card["number"], reply["in_reply_to"], body)
+                else:
+                    url = github.comment(card["repo"], card["number"], f"@{reply['author']} {body}")
+            except github.GitHubError as exc:
+                self.store.finish_action(key, head, event, False)
+                self.store.add_event(key, "error", f"answering {reply['author']} failed: {exc}")
+                continue
+            self.store.finish_action(key, head, event, True, {"url": url, "decision": answer["decision"]})
+            self.store.add_event(key, "action", f"agent answered {reply['author']} ({answer['decision']}): {body[:160]}",
+                                 {"url": url})
+            if answer["decision"] == "concede" and answer["finding"] and answer.get("about") == "ci":
+                ci_waived.add(answer["finding"])
+            elif answer["decision"] == "concede" and answer["finding"]:
+                waived.add(answer["finding"])
+            elif answer["decision"] == "maintainer":
+                maintainer.append(answer["reply"])
+        for answer in followed:  # what your own comments decided
+            if answer["decision"] == "concede" and answer["finding"]:
+                (ci_waived if answer.get("about") == "ci" else waived).add(answer["finding"])
+        decision = dict(self.store.get_pr(key)["decision"], waived_findings=sorted(waived), ci_waived=sorted(ci_waived))
+        if followed:  # you have spoken: it is no longer waiting on you
+            decision.update(needs_you_head="", needs_you_reason="")
+            if any(a["decision"] == "approve" for a in followed):
+                decision["approve_head"] = head
+            elif any(a["decision"] == "hold" for a in followed):
+                decision["waiting_author_head"] = head
+        if maintainer:
+            decision.update(needs_you_head=head, needs_you_reason="the author disputes a finding: " + maintainer[0][:200])
+        self.store.update_pr(key, decision=decision)
+
+    def approved_this_head(self, card, head):
+        if card["decision"].get("approved_head") == head:
+            return True
+        approved = any(a["event"] == "review:approve" and a["head"] == head and a["phase"] == "done"
+                       for a in self.store.actions(card["key"]))
+        approved = approved or head in github.approved_heads(card["repo"], card["number"], self.login)
+        if approved:
+            self.store.update_pr(card["key"], decision=dict(self.store.get_pr(card["key"])["decision"],
+                                                            approved_head=head))
+        return approved
+
+    def findings_review(self, key, head):
+        done = [a for a in self.store.actions(key)
+                if a["head"] == head and a["event"] == "review:findings" and a["phase"] == "done"]
+        return done[0]["result"] if done else None
+
+    CI_FAMILIES = ("tag-and-rerun", "rerun-test", "rerun-failed", "rerun-cancelled")
+    RETRY_LIMIT = 3            # sends of one CI command family per head
+    RETRY_GAP = 30 * 60        # wait before the next send; doubles each time
+    RERUN_TIMEOUT = 2 * 3600   # a rerun that never produced a new result
+
+    def ci_attempts(self, key, head, family):
+        """Done sends of one CI command family on this head, oldest first.
+        Matches both `ci:<family>#n` and the older un-numbered event names."""
+        return sorted((a for a in self.store.actions(key)
+                       if a["head"] == head and a["phase"] == "done"
+                       and re.match(rf"ci:{family}(#|:|$)", a["event"])),
+                      key=lambda a: a["ts"])
+
+    def retry_due(self, attempts, now):
+        return len(attempts) < self.RETRY_LIMIT and (
+            not attempts or now - attempts[-1]["ts"] >= self.RETRY_GAP * 2 ** (len(attempts) - 1))
+
+    def send_ci(self, card, head, family, command, why, attempts, by="agent"):
+        suggestion = {"family": family, "command": command, "why": why,
+                      "event": f"ci:{family}#{len(attempts) + 1}"}
+        return self.run_command(card["key"], head, suggestion, by=by)
+
+    def handle_ci(self, card, snap, merge_gate=True):
+        """Run CI to completion without you: send the CI commands, retry what
+        did not run with backoff, approve held fork runs, triage failures and
+        tell the author about the ones that are theirs. For an approved head it
+        also decides merge readiness. In live mode nothing here waits on you."""
+        key, head, now = card["key"], snap["headRefOid"], time.time()
+        previous = card["ci"] or {}
+        triage_record = previous.get("triage") if previous.get("head") == head else None
+        sent = {family: self.ci_attempts(key, head, family) for family in self.CI_FAMILIES}
+        exhausted = {f for f, attempts in sent.items()
+                     if len(attempts) >= self.RETRY_LIMIT and now - attempts[-1]["ts"] >= self.RETRY_GAP}
+
+        targeted_status, extra_failures = None, []
+        if sent["rerun-test"]:
+            since = datetime.fromtimestamp(sent["rerun-test"][-1]["ts"] - 120, timezone.utc)
+            targeted_status = github.rerun_test_status(card["repo"], card["number"],
+                                                       since.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            if targeted_status["state"] == "failed":
+                finished = targeted_status.get("updated_at", "")
+                for run_url in targeted_status["runs"]:
+                    extra_failures += [dict(job, name=ci.TARGETED_PREFIX + job["name"],
+                                            completed_at=job.get("completed_at") or finished)
+                                       for job in github.run_failed_jobs(run_url)]
+                if not extra_failures:  # no job list to read: the run as a whole failed
+                    extra_failures = [{"name": ci.TARGETED_PREFIX + "rerun-test", "url": targeted_status["url"],
+                                       "conclusion": "FAILURE", "completed_at": finished}]
+        assessment = ci.assess(card, snap, triage_record, extra_failures, exhausted,
+                               waived=card["decision"].get("ci_waived") or ())
+        targeted_state = (targeted_status or {}).get("state")
+        if targeted_state == "missing" and "rerun-test" not in exhausted:
+            for suggestion in assessment["suggestions"]:
+                if suggestion["family"] == "rerun-test":  # the bot never answered (a queued run is not stuck)
+                    suggestion.update(retry=True, why="the bot never answered the last /rerun-test; sending again")
+        if targeted_state == "missing" and "rerun-test" in exhausted:
+            assessment["notes"].append(f"targeted tests never reported back after {self.RETRY_LIMIT} sends")
+
+        manual = []
+        for suggestion in assessment["suggestions"]:
+            family = suggestion["family"]
+            attempts = sent[family]
+            if assessment["conflict"]:  # GitHub runs no PR CI on a conflicting head
+                suggestion.update(event=f"ci:{family}#{len(attempts) + 1}", attempts=len(attempts),
+                                  state="done" if attempts else "todo", sent_at=attempts[-1]["ts"] if attempts else 0)
+                continue
+            if family == "rerun-test" and not suggestion.get("retry"):
+                due = not attempts
+            elif family == "rerun-failed":
+                newest = max((epoch(f.get("completed_at") or "") for f in assessment["retryable"]), default=0)
+                took_effect = not attempts or newest > attempts[-1]["ts"] or now - attempts[-1]["ts"] >= self.RERUN_TIMEOUT
+                due = len(attempts) < self.RETRY_LIMIT and took_effect
+            else:
+                due = self.retry_due(attempts, now)
+            suggestion.update(event=f"ci:{family}#{len(attempts) + 1}", attempts=len(attempts),
+                              state="todo" if due or not attempts else "done",
+                              sent_at=attempts[-1]["ts"] if attempts else 0)
+            if not due:
+                continue
+            if not self.auto_allowed(card, family):
+                manual.append(suggestion)
+            elif self.run_command(key, head, suggestion, by="agent"):
+                suggestion.update(state="done", attempts=len(attempts) + 1, sent_at=now)
+        sent = {family: self.ci_attempts(key, head, family) for family in self.CI_FAMILIES}
+        if sent["rerun-test"] and targeted_status is None:
+            targeted_state = "running"  # sent just now
+        assessment.update(triage=triage_record, targeted=targeted_status,
+                          attempts={f: len(a) for f, a in sent.items() if a})
+        self.store.update_pr(key, ci=assessment)
+        if assessment["needs_triage"]:
+            self.submit(key, self.job_ci_triage, key, snap, assessment["failures"])
+        if not merge_gate:
+            return  # no approval yet: CI is run and shown, not judged
+
+        status, counts = assessment["status"], assessment["checks"]["counts"]
+        related = [f for f in assessment["blocking"] if f["classification"] == "related"]
+        unknown = [f for f in assessment["blocking"] if f["classification"] != "related"]
+        note = {
+            "running": f"CI running ({counts['success']} passed, {counts['failure']} failed, {counts['pending']} pending)",
+            "not_started": "CI has not started",
+            "gated": "CI is held by the run-ci gate",
+            "cancelled": f"{counts['cancelled']} job(s) cancelled",
+            "failed": f"{counts['failure']} CI failure(s)",
+            "green": "CI passed",
+        }[status]
+        held = (self.approve_held_runs(card, snap)
+                if status in ("running", "not_started", "gated") and not assessment["conflict"] else None)
+        targeted_waiting = (any(sg["family"] == "rerun-test" for sg in assessment["suggestions"])
+                            and "rerun-test" not in exhausted
+                            and (not sent["rerun-test"] or targeted_state in ("running", "missing")))
+        merge_ready = False
+
+        if assessment["conflict"] and self.try_fix(card, snap, "conflict"):
+            pass  # the agent merges main and resolves the conflicts itself
+        elif assessment["conflict"]:
+            self.store.set_stage(key, "needs_author", "approved; merge conflict with main")
+            self.author_note(key, head, "github:bounce:conflict",
+                             "To move this forward, please:\n- rebase onto main and resolve the merge conflicts")
+        elif related and self.try_fix(card, snap, "ci", [
+                {"id": f"C{i + 1}", "job": f["name"], "url": f.get("url", ""), "evidence": f.get("evidence", "")}
+                for i, f in enumerate(related[:5])]):
+            pass  # the agent fixes what the logs point at
+        elif related:
+            names = ", ".join(f["name"].split(" / ")[-1] for f in related[:3])
+            self.store.set_stage(key, "needs_author", f"CI failures related to the change ({names}); author pinged")
+            self.author_note(key, head, f"github:ci-related:{assessment['signature']}",
+                             self.ci_note(card, head, related, related=True))
+            self.slack_reply(key, head, "ci_related", names=names)
+        elif held == "workflow-change":
+            self.set_ready(card, "ci", "fork CI runs wait for approval and the PR edits .github/; approve them yourself")
+        elif assessment["needs_triage"]:
+            self.store.set_stage(key, "approved", note + ", agent is reading the logs")
+        elif status == "running":
+            self.store.set_stage(key, "approved", note + (f", approved {held} held run(s)" if held else ""))
+        elif unknown:
+            self.handle_unknown_failures(card, head, unknown, sent, now, assessment["signature"])
+        elif manual:
+            self.set_ready(card, "ci", note + "; send " + ", ".join(sg["command"].split()[0] for sg in manual))
+        elif not assessment["passed"] or targeted_waiting:
+            retrying = [f"{sg['command'].split()[0]} ({len(sent[sg['family']])}/{self.RETRY_LIMIT})"
+                        for sg in assessment["suggestions"]
+                        if sg["family"] != "rerun-test" and sg["family"] not in exhausted and sent[sg["family"]]]
+            if retrying and not assessment["passed"]:
+                reason = note + ", agent retrying: " + ", ".join(retrying)
+            elif targeted_waiting:
+                reason = note + ", targeted tests running"
+            else:
+                reason = note + f", still not passing after {self.RETRY_LIMIT} retries; the agent keeps watching"
+            self.store.set_stage(key, "approved", reason)
+        else:
+            merge_ready = card["review_decision"] == "APPROVED"
+            outcome = self.try_auto_merge(card, snap) if merge_ready else None
+            if outcome == "merged":
+                return
+            if not merge_ready:
+                self.store.set_stage(key, "approved", "CI passed, GitHub still needs a code-owner approval")
+            elif outcome is None:  # auto-merge off: the merge is your click
+                self.store.set_stage(key, "approved", "ready to merge")
+                self.notify_once(key, head, "notify:mergeable", f"Ready to merge: {card['title']}")
+        card = self.store.get_pr(key)
+        merge_ready = merge_ready and card["stage"] == "approved"
+        decision = {k: v for k, v in card["decision"].items() if not (k == "ready_kind" and card["stage"] != "ready")}
+        self.store.update_pr(key, decision=dict(decision, merge_ready=merge_ready,
+                                                merge_notes=assessment["notes"] if merge_ready else []))
+        self.slack_reply(key, head, "approved")
+
+    MERGE_HOLD = re.compile(r"\b(wip|do[- ]?not[- ]?merge|dnm|on[- ]hold|hold)\b", re.I)
+
+    MERGE_STUCK_AFTER = 3  # failed merges in a row before it needs you
+
+    def try_auto_merge(self, card, snap):
+        """Merge a PR that meets the merge bar, as you. Guarded by live mode and
+        policy, a daily budget, WIP / do-not-merge markers, and a backoff after a
+        failed attempt; merge() re-checks the head and CI right before merging.
+        Returns None when auto-merge is off, "merged", or "waiting" (stage set)."""
+        if not (is_live(self.config) and self.policy["auto_merge"]):
+            return None
+        key, head = card["key"], snap["headRefOid"]
+        labels = [label["name"] for label in snap.get("labels") or []]
+        if snap.get("isDraft") or self.MERGE_HOLD.search(snap.get("title") or "") \
+                or any(self.MERGE_HOLD.search(label) for label in labels):
+            self.store.set_stage(key, "approved", "ready to merge; held by a WIP / do-not-merge marker")
+            return "waiting"
+        if self.store.count_events("merge", time.time() - 86400) >= self.policy["max_auto_merges_per_day"]:
+            self.store.set_stage(key, "approved", "ready to merge; daily auto-merge budget used")
+            return "waiting"
+        failure = card["decision"].get("merge_failure") or {}
+        if failure.get("head") == head and \
+                time.time() - failure["at"] < min(600 * 2 ** (failure["count"] - 1), 7200):
+            self.merge_waiting(card, failure)
+            return "waiting"
+        try:
+            self.merge(key, by="agent")
+            return "merged"
+        except (github.GitHubError, ValueError) as exc:
+            lines = str(exc).strip().splitlines()
+            error = (lines[-1] if lines else "unknown error")[:200]
+            count = failure.get("count", 0) + 1 if failure.get("head") == head else 1
+            unlinked = []
+            if isinstance(exc, github.GitHubError) and ("--admin" in str(exc) or "prohibits" in str(exc)):
+                try:  # blocked by the repo's rules: commits not linked to an account are the usual cause
+                    unlinked = github.unlinked_commits(card["repo"], card["number"])
+                except github.GitHubError:
+                    pass
+            self.store.update_pr(key, decision=dict(self.store.get_pr(key)["decision"], merge_failure={
+                "head": head, "at": time.time(), "count": count, "error": error, "unlinked": unlinked}))
+            self.store.add_event(key, "error", f"auto-merge failed: {error}")
+            self.merge_waiting(self.store.get_pr(key), {"count": count, "error": error, "unlinked": unlinked})
+            return "waiting"
+
+    def merge_waiting(self, card, failure):
+        """A failed merge retries on its own; only a repeated failure needs you.
+        Commits not linked to a GitHub account are the author's to fix."""
+        if failure.get("unlinked"):
+            key, head = card["key"], card["head_sha"]
+            commits = ", ".join(f"`{oid[:8]}`" for oid in failure["unlinked"][:5])
+            self.store.set_stage(key, "needs_author", f"GitHub blocks the merge: commit {commits} is not linked to "
+                                 "a GitHub account; author asked")
+            self.author_note(key, head, "github:unlinked-commits", (
+                f"@{card['author']} this is approved, but GitHub blocks the merge: commit {commits} is not linked "
+                "to your GitHub account (its author email is not on any account), and this repo needs an extra "
+                "approval for such commits. Adding that email to your account (Settings → Emails), or "
+                "re-committing with your GitHub email and pushing, should unblock it. It merges automatically after that."))
+        elif failure["count"] >= self.MERGE_STUCK_AFTER:
+            self.set_ready(card, "merge", f"auto-merge failed {failure['count']} times: {failure['error']}")
+        else:
+            self.store.set_stage(card["key"], "approved", "ready to merge; auto-merge failed, retrying: " + failure["error"])
+
+    # ---- agent fixes: what the author would otherwise be waited on for ------
+    FIX_TASKS = {"conflict": "resolve the merge conflicts with main",
+                 "findings": "fix the verified review findings",
+                 "ci": "fix the CI failures caused by this change"}
+
+    def try_fix(self, card, snap, kind, issues=()):
+        """Fix it instead of waiting on the author. False when the policy, a
+        cap, your hand-off to the author or an earlier attempt on this head
+        says no; the caller then asks the author as before."""
+        if not (is_live(self.config) and self.policy["auto_fix"]):
+            return False
+        key, head = card["key"], snap["headRefOid"]
+        if card["decision"].get("waiting_author_head") == head or (kind != "conflict" and not issues):
+            return False
+        if key in self.inflight:
+            return True
+        actions = self.store.actions(key)
+        if any(a["head"] == head and a["event"] == f"fix:{kind}" for a in actions):
+            return False  # one attempt per head
+        if sum(1 for a in actions if a["event"].startswith("fix:") and (a["result"] or {}).get("pushed")) \
+                >= self.policy["max_agent_fixes_per_pr"]:
+            return False
+        if self.store.count_events("fix", time.time() - 86400) >= self.policy["max_agent_fixes_per_day"]:
+            return False
+        self.store.set_stage(key, "reviewing", f"agent is trying to {self.FIX_TASKS[kind]}")
+        self.submit(key, self.job_fix, key, snap, kind, list(issues))
+        return True
+
+    def job_fix(self, key, snap, kind, issues):
+        """One attempt per head and kind. Pushed: tell the author, the new head
+        is reviewed again. Not pushed: the next refresh hands it to the author."""
+        head = snap["headRefOid"]
+        if not self.store.claim_action(key, head, f"fix:{kind}"):
+            return
+        result = {"pushed": False, "reason": "failed"}
+        try:
+            result = self.run_fix(self.store.get_pr(key), snap, kind, issues)
+        finally:
+            self.store.finish_action(key, head, f"fix:{kind}", True, result)
+        card = self.store.get_pr(key)
+        if not result["pushed"]:
+            self.store.add_event(key, "fix", f"agent could not {self.FIX_TASKS[kind]}: {result['reason']}")
+            self.store.set_stage(key, "queued", f"agent could not {self.FIX_TASKS[kind]}; asking the author")
+            return
+        sha = result["head"]
+        self.store.add_event(key, "fix", f"agent pushed {sha[:8]}: {result['summary']}",
+                             {"url": f"{card['url']}/commits/{sha}"})
+        titles = {issue["id"]: issue.get("title") or issue.get("job") or issue["id"] for issue in issues}
+        lines = [f"@{card['author']} I pushed `{sha[:8]}` to your branch: {result['summary']}."]
+        if kind != "conflict" and result["skipped"]:
+            lines.append("Still for you:")
+            lines += [f"- {titles.get(s['id'], s['id'])}: {s['reason']}" for s in result["skipped"]]
+        lines.append("Please pull before your next push. The review runs again on the new head.")
+        self.author_note(key, head, f"github:fix:{kind}", "\n".join(lines))
+        self.store.set_stage(key, "queued", f"agent pushed {sha[:8]} ({result['summary']}); reviewing the new head")
+
+    def run_fix(self, card, snap, kind, issues):
+        target = github.push_target(card["repo"], card["number"])
+        if not target:
+            return {"pushed": False, "reason": "the author does not allow edits from maintainers"}
+        if kind == "ci":
+            for issue in issues:
+                issue["log_tail"] = github.failed_job_log(issue["url"], 120)
+        base = snap["baseRefName"]
+        ws = agent.Workspace(self.config, card["repo"], card["number"], snap["headRefOid"], base)
+        try:
+            ws.prepare(snap)
+            checkout = fixer.Checkout(ws.worktree, self.login, self.noreply_email())
+            outcome = {"fixed": [], "skipped": [], "summary": ""}
+            if kind == "conflict":
+                conflicted = checkout.merge(f"origin/{base}")
+                if conflicted:
+                    outcome = agent.fix(self.config, ws.worktree, card["repo"], card["number"],
+                                        f"Resolve the conflicts from merging {base} into this PR.",
+                                        [{"id": f, "file": f} for f in conflicted])
+                    left = checkout.unresolved(conflicted)
+                    if left:
+                        checkout.abort_merge()
+                        return {"pushed": False, "reason": "conflicts left in " + ", ".join(left[:3])}
+                    checkout.tidy(conflicted)
+                    checkout.compile_check(conflicted)
+                    checkout.finish_merge(conflicted)
+                files = ", ".join(f"`{f}`" for f in conflicted[:5])
+                outcome["summary"] = f"merged {base} and resolved the conflicts in {files}" if conflicted \
+                    else f"merged {base}"
+            else:
+                task = self.FIX_TASKS[kind][0].upper() + self.FIX_TASKS[kind][1:] + "."
+                outcome = agent.fix(self.config, ws.worktree, card["repo"], card["number"], task, issues)
+                changed = checkout.changed_files()
+                if not changed:
+                    reasons = "; ".join(s["reason"] for s in outcome["skipped"][:2])
+                    return {"pushed": False, "reason": reasons or "no change the agent was confident in"}
+                checkout.tidy(changed)
+                changed = checkout.changed_files()
+                checkout.compile_check(changed)
+                checkout.commit(fixer.commit_message(outcome["summary"]), changed)
+            sha = checkout.head()
+            checkout.push(target["url"], target["branch"])
+        finally:
+            ws.cleanup()
+        return {"pushed": True, "head": sha, "summary": outcome["summary"].strip().rstrip("."),
+                "fixed": outcome["fixed"], "skipped": outcome["skipped"]}
+
+    def noreply_email(self):
+        """Your GitHub noreply address: agent commits count as attributed to you."""
+        if not getattr(self, "_noreply", None):
+            user = github.gh_json(["api", "user"])
+            self._noreply = f"{user['id']}+{user['login']}@users.noreply.github.com"
+        return self._noreply
+
+    def handle_unknown_failures(self, card, head, failures, sent, now, signature):
+        """A failure nobody could attribute gets one fresh run; if it fails
+        again, the author is asked to look. Never parked on you."""
+        key = card["key"]
+        family_of = lambda f: "rerun-test" if f["name"].startswith(ci.TARGETED_PREFIX) else "rerun-failed"  # noqa: E731
+        todo, waiting, again = set(), False, []
+        for failure in failures:
+            attempts = sent[family_of(failure)]
+            finished = epoch(failure.get("completed_at") or "")
+            if any(a["ts"] < finished for a in attempts) or len(attempts) >= self.RETRY_LIMIT:
+                again.append(failure)  # it already failed after a rerun
+            elif attempts and now - attempts[-1]["ts"] < self.RERUN_TIMEOUT:
+                waiting = True
+            else:
+                todo.add(family_of(failure))
+        review = card["review"] or {}
+        for family in sorted(todo):
+            if not self.auto_allowed(card, family):
+                continue
+            command = "/rerun-failed-ci" if family == "rerun-failed" else \
+                "/rerun-test " + " ".join(review.get("targeted_tests") or [])
+            self.send_ci(card, head, family, command, "unattributed failure: one fresh run first", sent[family])
+        readable = [f for f in again if evidence_line(f)]
+        if todo or waiting:
+            self.store.set_stage(key, "approved", f"{len(failures)} unattributed CI failure(s), rerunning once")
+        elif not readable:  # nothing concrete to show the author; don't guess at them
+            self.store.set_stage(key, "approved", f"{len(again)} CI failure(s) without a readable log; "
+                                 "the agent keeps watching")
+        else:
+            again = readable
+            names = ", ".join(f["name"].split(" / ")[-1] for f in again[:3])
+            self.store.set_stage(key, "needs_author", f"CI still failing after a rerun ({names}); author pinged")
+            self.author_note(key, head, f"github:ci-unknown:{signature}",
+                             self.ci_note(card, head, again, related=False))
+
+    def approve_held_runs(self, card, snap):
+        """Approve the fork workflow runs GitHub holds for maintainer approval,
+        on lanes this change needs. The code itself is already approved."""
+        if not (is_live(self.config) and self.policy["auto_ci"]):
+            return None
+        head = snap["headRefOid"]
+        try:
+            runs = github.runs_awaiting_approval(card["repo"], head)
+        except github.GitHubError:
+            return None
+        platforms = ci.pr_platforms(snap) | {"base"}
+        runs = [r for r in runs if (ci.lane_platform(r["workflow"] + " / ") or "base") in platforms]
+        if not runs:
+            return None
+        if any((f.get("path") or "").startswith(".github/") for f in snap.get("files") or []):
+            return "workflow-change"
+        approved = 0
+        for run in runs:
+            event = f"ci:approve-run:{run['id']}"
+            if not self.store.claim_action(card["key"], head, event):
+                continue
+            try:
+                github.approve_run(card["repo"], run["id"])
+            except github.GitHubError as exc:
+                self.store.finish_action(card["key"], head, event, False)
+                self.store.add_event(card["key"], "error", f"approving held run {run['workflow']} failed: {exc}")
+                continue
+            self.store.finish_action(card["key"], head, event, True, {"url": run["url"]})
+            self.store.add_event(card["key"], "action", f"agent approved held CI run: {run['workflow']}",
+                                 {"url": run["url"]})
+            approved += 1
+        return approved or None
+
+    def ci_note(self, card, head, failures, related):
+        lines = [f"@{card['author']} " + (
+            f"these CI failures on `{head[:12]}` look related to this change:" if related else
+            f"these jobs still fail on `{head[:12]}` after a rerun, and the logs don't make it clear "
+            "whether this PR causes it. Could you take a look?")]
+        for failure in failures[:5]:
+            evidence = evidence_line(failure)
+            lines.append(f"- [`{failure['name'].split(' / ')[-1]}`]({failure.get('url', '')})"
+                         + (f": `{evidence[:200]}`" if evidence else ""))
+        if related:
+            lines.append("CI and the review run again after your next push.")
+        return "\n".join(lines)
+
+    def auto_approve_tiers(self):
+        return self.policy["auto_approve_tiers"] if is_live(self.config) and self.policy["auto_approve"] \
+            else ["T1", "T2"]
+
+    def auto_approve_allowed(self):
+        if not (is_live(self.config) and self.policy["auto_approve"]):
+            return False
+        return self.store.count_events("approve", time.time() - 86400) < self.policy["max_auto_approvals_per_day"]
+
+    def set_ready(self, card, kind, reason):
+        self.store.update_pr(card["key"], decision=dict(card["decision"], ready_kind=kind))
+        self.store.set_stage(card["key"], "ready", reason)
+        self.notify_once(card["key"], card["head_sha"], f"notify:ready:{kind}", f"Needs you: {card['title']}")
+
+    def auto_allowed(self, card, family):
+        if not is_live(self.config):
+            return False
+        family = family.removeprefix("ci:").split("#")[0].split(":")[0]
+        if family == "tag-and-rerun":
+            return self.policy["auto_ci"]
+        if family == "rerun-test":
+            return self.policy["auto_targeted_tests"]
+        if family in ("rerun-failed", "rerun-cancelled"):
+            return self.policy["auto_retry_failed_ci"]
+        return False
+
+    # ---- jobs (worker threads) -------------------------------------------
+    def submit(self, key, fn, *args):
+        with self.lock:
+            if key in self.inflight:
+                return
+            self.inflight[key] = fn.__name__
+
+        def wrapped():
+            decision = {}
+            try:
+                fn(*args)
+                decision = {"refresh": True, "error_count": 0}
+                self.status.pop("agent_blocked", None)
+            except Exception as exc:
+                errors = self.store.get_pr(key)["decision"].get("error_count", 0) + 1
+                # refresh_due backs off: 5 min, doubling, at most hourly.
+                decision = {"error_count": errors}
+                self.store.set_stage(key, "error", f"failure #{errors}: {self.agent_blocked(exc) or str(exc)[:300]}")
+                self.store.add_event(key, "error", traceback.format_exc()[-1200:])
+            finally:
+                with self.lock:
+                    self.inflight.pop(key, None)
+                self.store.update_pr(key, decision=dict(self.store.get_pr(key)["decision"], **decision))
+                self.wake.set()
+
+        self.executor.submit(wrapped)
+
+    def agent_blocked(self, exc):
+        """An account-level stop (usage limit / spend cap on every codex
+        account) is shown once at the top of the page instead of as a long
+        error on every card."""
+        if not agent.LIMIT_HIT.search(str(exc)):
+            return ""
+        self.status["agent_blocked"] = {"reason": "every codex account is out of quota", "at": time.time()}
+        return "every codex account is out of quota, retrying automatically"
+
+    def job_review(self, key, snap, tier):
+        head = snap["headRefOid"]
+        self.store.set_stage(key, "reviewing", f"agent reviewing ({tier}, {self.config['agent']['runner']})")
+        card = self.store.get_pr(key)
+        workspace = agent.Workspace(self.config, card["repo"], card["number"], head, snap["baseRefName"])
+        skill_dir, skill_commit = (self.skills.ensure() if self.skills
+                                   else (self.config["agent"]["review_skill_dir"], ""))
+        try:
+            workspace.prepare(snap)
+            ranges = new_side_ranges((workspace.ctx / "diff.patch").read_text())
+            result, review_info = agent.review(self.config, workspace, tier, skill_dir, skill_commit)
+            findings = [dict(f, anchored=anchored(f, ranges)) for f in result["findings"]]
+            verification, verify_info = agent.verify(self.config, workspace, findings)
+            kept, dropped = agent.apply_verification(findings, verification)
+            # Asking again for evidence someone already asked for is noise, not review.
+            repeats = [f for f in kept if f.get("raised_before") and not agent.is_risk(f)]
+            kept = [f for f in kept if f not in repeats]
+            dropped += [dict(f, verify="rejected", verify_reason="repeats an earlier evidence request")
+                        for f in repeats]
+            verdict = agent.effective_verdict(result, kept)
+        finally:
+            workspace.cleanup()
+        review = dict(result, findings=kept, dropped=dropped, verdict=verdict,
+                      agent_verdict=result["verdict"], head=head, at=time.time(),
+                      skill_commit=skill_commit, runs=[review_info, verify_info])
+        self.store.update_pr(key, review=review, review_head=head)
+        self.store.add_event(key, "review",
+                             f"agent review done: {verdict}, {len(kept)} finding(s) kept, {len(dropped)} rejected by the verifier"
+                             + (f", skill {skill_commit[:8]}" if skill_commit else ""),
+                             {"seconds": review_info.get("seconds")})
+
+    def job_ci_triage(self, key, snap, failures):
+        head = snap["headRefOid"]
+        card = self.store.get_pr(key)
+        workspace = agent.Workspace(self.config, card["repo"], card["number"], head, snap["baseRefName"])
+        try:
+            workspace.prepare(snap)
+            # Every failing leg gets its log, at most 20: one leg per job first,
+            # then the other legs. Downloaded in parallel because large logs are slow.
+            first = {}
+            for failure in failures:
+                workflow, _, job = failure["name"].rpartition(" / ")
+                first.setdefault(f"{workflow} / {job.split(' (')[0]}", failure["name"])
+            order = list(first.values()) + [f["name"] for f in failures if f["name"] not in first.values()]
+            wanted = [f for f in failures if f["name"] in set(order[:20])]
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                logs = dict(zip([f["name"] for f in wanted],
+                                pool.map(lambda f: github.failed_job_log(f["url"], 150), wanted)))
+            with_logs = [dict(f, log_tail=logs.get(f["name"], NO_LOG)) for f in failures]
+            result, info = agent.triage_ci(self.config, workspace, with_logs,
+                                           (card["review"] or {}).get("related_tests") or [])
+        finally:
+            workspace.cleanup()
+        card = self.store.get_pr(key)
+        record = dict(result, signature=ci.signature(failures), head=head, at=time.time())
+        self.store.update_pr(key, ci=dict(card["ci"] or {}, triage=record))
+        self.store.add_event(key, "ci", f"CI triage: {result['summary']}", {"seconds": info.get("seconds")})
+
+    # ---- external writes ------------------------------------------------
+    def run_command(self, key, head, suggestion, by):
+        card = self.store.get_pr(key)
+        if not self.store.claim_action(key, head, suggestion["event"]):
+            return False
+        body = suggestion["command"]
+        if suggestion["event"].startswith("ci:rerun-test"):
+            body += f"\n\nTargeted validation for `{head[:12]}`."
+        try:
+            url = github.comment(card["repo"], card["number"], body)
+        except github.GitHubError as exc:
+            self.store.finish_action(key, head, suggestion["event"], False)
+            self.store.add_event(key, "error", f"sending {suggestion['command']} failed: {exc}")
+            return False
+        self.store.finish_action(key, head, suggestion["event"], True, {"url": url, "by": by})
+        self.store.add_event(key, "action", f"{'agent' if by == 'agent' else 'you'} sent {body.splitlines()[0]}",
+                             {"url": url})
+        return True
+
+    def publish_findings(self, key, by):
+        card = self.store.get_pr(key)
+        review, head = card["review"], card["review_head"]
+        if head != card["head_sha"]:
+            raise ValueError("the PR has a new push; these findings are stale, re-review first")
+        wanted = [f for f in review["findings"]
+                  if by == "human" or (f["verify"] == "confirmed" and f["severity"] != "nit" and agent.is_risk(f))]
+        if not wanted:
+            raise ValueError("no findings to publish")
+        if not self.store.claim_action(key, head, "review:findings"):
+            raise ValueError("findings for this head were already published")
+        # Points already raised earlier are not posted again, only listed as still open.
+        new = [f for f in wanted if not f.get("raised_before")]
+        again = [f for f in wanted if f.get("raised_before")]
+        inline = [{"path": f["path"], "line": f["line"], "side": "RIGHT", "body": f["comment"]}
+                  for f in new if f.get("anchored")]
+        loose = [f"- `{f['path']}:{f['line']}` {f['comment']}" for f in new if not f.get("anchored")]
+        p1 = any(f["severity"] in ("blocker", "major") for f in wanted)
+        body = "Please address the [P1] items, then re-ping." if p1 else "A few non-blocking notes."
+        if loose:
+            body += "\n\n" + "\n".join(loose)
+        if again:
+            body += "\n\nStill open from the earlier review:\n" + "\n".join(
+                f"- {f['title']} (`{f['path']}:{f['line']}`)" for f in again)
+        body += FOOTER.format(head=head[:12])
+        try:
+            result = github.submit_review(card["repo"], card["number"], head, "COMMENT", body, inline)
+        except github.GitHubError:
+            self.store.finish_action(key, head, "review:findings", False)
+            raise
+        self.store.finish_action(key, head, "review:findings", True, result)
+        self.store.add_event(key, "action", f"published {len(wanted)} finding(s)", result)
+        return result
+
+    def approve(self, key, note="", by="human"):
+        card = self.store.get_pr(key)
+        snap = github.fetch_pr(card["repo"], card["number"])
+        head = snap["headRefOid"]
+        if head != card["review_head"]:
+            raise ValueError(f"head moved from {card['review_head'][:8]} to {head[:8]}; re-review first")
+        if head in github.approved_heads(card["repo"], card["number"], self.login):
+            self.store.set_stage(key, "approved", "you already approved this head on GitHub")
+            raise ValueError("you already approved this head on GitHub")
+        if not self.store.claim_action(key, head, "review:approve"):
+            raise ValueError("this head was already approved")
+        body = note or card["review"].get("approve_note") or "LGTM."
+        if not note and self.findings_review_any(key) and any(
+                f["severity"] in ("blocker", "major") and not agent.is_risk(f) for f in card["review"]["findings"]):
+            body += "\n\nThe earlier notes asking for more tests or measurements are non-blocking."
+        try:
+            result = github.submit_review(card["repo"], card["number"], head, "APPROVE", body)
+        except github.GitHubError:
+            self.store.finish_action(key, head, "review:approve", False)
+            raise
+        self.store.finish_action(key, head, "review:approve", True, dict(result, by=by))
+        self.store.add_event(key, "approve", f"{'agent' if by == 'agent' else 'you'} approved {head[:8]}", result)
+        labels = {label["name"] for label in snap.get("labels") or []}
+        if ci.RUN_CI_LABEL not in labels and self.policy["auto_ci"]:
+            self.send_ci(card, head, "tag-and-rerun", "/tag-and-rerun-ci", "no run-ci label",
+                         self.ci_attempts(key, head, "tag-and-rerun"), by=by)
+        self.store.set_stage(key, "approved", "approved, tracking CI until mergeable")
+        return result
+
+    def merge(self, key, by="human"):
+        """Your click, or the agent once the PR meets the merge bar (policy
+        auto_merge). Re-checks head and CI right before merging."""
+        card = self.store.get_pr(key)
+        snap = github.fetch_pr(card["repo"], card["number"])
+        head = snap["headRefOid"]
+        if head != card["review_head"]:
+            raise ValueError("the head moved; wait for the re-review")
+        if not (card["ci"] or {}).get("passed") or (card["ci"] or {}).get("head") != head:
+            raise ValueError("CI on the current head has not passed the merge bar")
+        if not self.store.claim_action(key, head, "merge"):
+            raise ValueError("merge already requested")
+        try:
+            github.merge(card["repo"], card["number"], head, self.config.get("merge_method", "squash"))
+        except github.GitHubError:
+            self.store.finish_action(key, head, "merge", False)
+            raise
+        self.store.finish_action(key, head, "merge", True, {"by": by})
+        self.store.update_pr(key, state="MERGED", meta=dict(card["meta"] or {}, merged_by=self.login))
+        self.store.add_event(key, "merge", f"{'agent' if by == 'agent' else 'you'} merged {head[:8]}",
+                             {"url": card["url"]})
+        self.store.set_stage(key, "closed", "merged")
+        self.slack_reply(key, head, "merged")
+
+    def author_note(self, key, head, event, text):
+        """A short PR comment telling the author why the PR is stuck (live + policy)."""
+        if not (is_live(self.config) and self.policy["auto_author_notes"]):
+            return
+        card = self.store.get_pr(key)
+        if not self.store.claim_action(key, head, event):
+            return
+        body = f"{text}\n\n<sub>Automated pre-review for `{head[:12]}`; it re-checks when the PR is updated.</sub>"
+        try:
+            url = github.comment(card["repo"], card["number"], body)
+        except github.GitHubError as exc:
+            self.store.finish_action(key, head, event, False)
+            self.store.add_event(key, "error", f"note to the author failed: {exc}")
+            return
+        self.store.finish_action(key, head, event, True, {"url": url})
+        self.store.add_event(key, "action", "note to the author: " + text.splitlines()[0], {"url": url})
+
+    def notify_once(self, key, head, event, text):
+        if not self.config.get("notify_macos", True):
+            return
+        if not self.store.claim_action(key, head or "-", event):
+            return
+        # PR titles are untrusted: pass them as argv, never inside the script.
+        subprocess.run(["osascript", "-e", "on run argv", "-e",
+                        'display notification (item 1 of argv) with title "Review Inbox"',
+                        "-e", "end run", text[:180]], capture_output=True)
+        self.store.finish_action(key, head or "-", event, True)

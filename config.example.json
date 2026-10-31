@@ -1,0 +1,111 @@
+{
+  "github_login": "<YOUR_GITHUB_LOGIN>",
+  "repos": [
+    "sgl-project/sglang"
+  ],
+  "mode": "shadow",
+  "sources": {
+    "slack": {
+      "enabled": true,
+      "poll_seconds": 120,
+      "lookback_days": 14,
+      "review_max_age_days": 14,
+      "watch_max_age_days": 3,
+      "watch_channels": [
+        "pull-requests"
+      ]
+    },
+    "slack_inbox": {
+      "enabled": true,
+      "poll_seconds": 300,
+      "lookback_days": 14
+    },
+    "github_mentions": {
+      "enabled": true,
+      "poll_seconds": 600,
+      "lookback_days": 3
+    },
+    "github_assigned": {
+      "enabled": true,
+      "poll_seconds": 600,
+      "lookback_days": 7
+    },
+    "github_review_requested": {
+      "enabled": false
+    }
+  },
+  "agent": {
+    "runner": "codex",
+    "codex_homes": [
+      "<PATH_TO_CODEX_HOME_1>",
+      "<PATH_TO_CODEX_HOME_2>"
+    ],
+    "max_concurrent": 4,
+    "daily_review_limit": 100,
+    "service_tier": "",
+    "profiles": {
+      "T1": {
+        "model": "<CODEX_MODEL>",
+        "effort": "high"
+      },
+      "T2": {
+        "model": "<CODEX_MODEL>",
+        "effort": "high"
+      },
+      "T3": {
+        "model": "<CODEX_MODEL_STRONGEST>",
+        "effort": "xhigh"
+      },
+      "verify": {
+        "model": "<CODEX_MODEL>",
+        "effort": "high"
+      },
+      "ci": {
+        "model": "<CODEX_MODEL>",
+        "effort": "medium"
+      },
+      "fix": {
+        "model": "<CODEX_MODEL>",
+        "effort": "high"
+      },
+      "discuss": {
+        "model": "<CODEX_MODEL>",
+        "effort": "high"
+      },
+      "translate": {
+        "model": "<CODEX_MODEL>",
+        "effort": "low"
+      }
+    }
+  },
+  "policy": {
+    "auto_ci": true,
+    "auto_targeted_tests": true,
+    "auto_retry_failed_ci": true,
+    "auto_publish_findings": true,
+    "auto_author_notes": true,
+    "auto_discuss": true,
+    "auto_approve": true,
+    "auto_approve_tiers": [
+      "T1",
+      "T2"
+    ],
+    "max_auto_approvals_per_day": 30,
+    "auto_merge": false,
+    "max_auto_merges_per_day": 30,
+    "auto_fix": false,
+    "max_agent_fixes_per_pr": 2,
+    "max_agent_fixes_per_day": 20,
+    "slack_report": true,
+    "slack_prefix": "[{login} Review Agent] ",
+    "slack_outcomes": [
+      "approved",
+      "changes",
+      "bounce",
+      "ci_related",
+      "merged"
+    ],
+    "require_test_plan": false
+  },
+  "notify_macos": true
+}

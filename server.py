@@ -182,6 +182,19 @@ class Handler(BaseHTTPRequestHandler):
             return {"added": [pr_key(*ref) for ref in refs]}
         if path == "/api/action":
             return self.action(store, pipeline, body)
+        if path == "/api/agent":  # the daily token cap and runs you start by hand
+            if body["action"] == "budget":
+                tokens = int(body["tokens"])
+                if not 0 <= tokens <= 1_000_000_000:
+                    raise ValueError("the daily limit must be between 0 and 1000M tokens")
+                pipeline.set_token_budget(tokens)
+            elif body["action"] == "run_now":
+                pipeline.run_now()
+            elif body["action"] == "stop_run":
+                pipeline.stop_run()
+            else:
+                raise ValueError("action must be budget, run_now or stop_run")
+            return pipeline.agent_status()
         if path == "/api/slack-token":
             return self.save_slack_token(pipeline, body.get("token", "").strip())
         if path == "/api/slack-item":

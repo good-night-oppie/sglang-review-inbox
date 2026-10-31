@@ -1499,13 +1499,42 @@ class Pipeline:
         return sorted(starts)
 
     def window_state(self, now=None):
-        """(open, next start): agent jobs start only inside a window; no windows = always open."""
+        """(open, next start): agent jobs start only inside a window, or a run you
+        started by hand; no windows = always open."""
         now = now or time.time()
         if not self.config["agent"].get("windows"):
             return True, now
         span = 60 * self.config["agent"].get("window_minutes", 120)
         starts = self.window_starts(now)
-        return any(start <= now < start + span for start in starts), next(s for s in starts if s > now)
+        open_ = any(start <= now < start + span for start in starts) or self.manual_until() > now
+        return open_, next(s for s in starts if s > now)
+
+    # You can change the daily cap and start a run from the page; both are kept in the store.
+    def token_budget(self):
+        return int(self.store.get_kv("daily_token_budget", self.config["agent"].get("daily_token_budget") or 0))
+
+    def set_token_budget(self, tokens):
+        self.store.set_kv("daily_token_budget", int(tokens))
+        self.kick(reset_sources=True)
+
+    def manual_until(self):
+        return float(self.store.get_kv("manual_window_until", 0) or 0)
+
+    def run_now(self):
+        """Open an agent window now, as long as a scheduled one."""
+        if self.budget_exhausted():
+            raise ValueError("today's agent token budget is used; raise the daily limit first")
+        self.store.set_kv("manual_window_until", time.time() + 60 * self.config["agent"].get("window_minutes", 120))
+        self.kick(reset_sources=True)  # every card is looked at again right away
+
+    def stop_run(self):
+        self.store.set_kv("manual_window_until", 0)
+
+    def budget_exhausted(self):
+        """Not even one more job fits under today's cap."""
+        budget = self.token_budget()
+        return bool(budget) and self.store.tokens_since(self.day_start()) + \
+            self.config["agent"].get("token_reserve", 150000) > budget
 
     def running_agent_jobs(self):
         return sum(1 for job in self.inflight.values() if job in self.AGENT_JOBS) + bool(self.translating)
@@ -1514,7 +1543,7 @@ class Pipeline:
         """'' when an agent job may start now, else why not. A card you just
         asked about (rereview, add, restore) skips the window, never the budget."""
         now, cfg = time.time(), self.config["agent"]
-        budget = cfg.get("daily_token_budget") or 0
+        budget = self.token_budget()
         if budget:
             used = self.store.tokens_since(self.day_start(now))
             if used + (self.running_agent_jobs() + 1) * cfg.get("token_reserve", 150000) > budget:
@@ -1529,12 +1558,17 @@ class Pipeline:
         return ""
 
     def agent_status(self):
-        now = time.time()
+        now, cfg = time.time(), self.config["agent"]
         open_, next_start = self.window_state(now)
-        return {"windows": self.config["agent"].get("windows") or [], "open": open_,
-                "next": next_start if self.config["agent"].get("windows") else 0,
+        tomorrow = self.day_start(now) + 86400
+        resume = [s for s in self.window_starts(now) if s >= tomorrow] if cfg.get("windows") else [tomorrow]
+        return {"windows": cfg.get("windows") or [], "open": open_,
+                "next": next_start if cfg.get("windows") else 0,
+                "manual_until": self.manual_until() if self.manual_until() > now else 0,
                 "tokens_today": self.store.tokens_since(self.day_start(now)),
-                "budget": self.config["agent"].get("daily_token_budget") or 0,
+                "budget": self.token_budget(), "default_budget": cfg.get("daily_token_budget") or 0,
+                "exhausted": self.budget_exhausted(), "resume_at": resume[0],
+                "running": self.running_agent_jobs(),
                 "blocked": self.agent_gate(window=False)}
 
     def submit(self, key, fn, *args):

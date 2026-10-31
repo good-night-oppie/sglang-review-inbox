@@ -77,6 +77,22 @@ input::placeholder { color: var(--muted); }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); display: inline-block; }
 .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); } .dot.off { background: var(--line-strong); }
 .spacer { flex: 1; }
+.agentbar { display: flex; align-items: center; gap: 12px 18px; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 14px; }
+.ab-left { display: flex; align-items: center; gap: 8px; }
+.ab-title { font-weight: 600; }
+.ab-meter { flex: 1; min-width: 180px; }
+.ab-meter-text { font-size: 12px; color: var(--muted); margin-bottom: 5px; font-variant-numeric: tabular-nums; }
+.ab-meter .bar { height: 6px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.ab-meter .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+.ab-meter .bar > div.over { background: var(--bad); }
+.ab-budget { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.ab-budget input { width: 80px; padding: 5px 8px; }
+.agent-alert { display: flex; align-items: flex-start; gap: 12px 14px; flex-wrap: wrap; background: var(--bad-soft);
+  border: 1px solid var(--bad); border-left-width: 6px; border-radius: var(--radius); padding: 14px 16px; margin-bottom: 12px; }
+.agent-alert .icon { font-size: 22px; line-height: 1.1; color: var(--bad); }
+.agent-alert .body { flex: 1; min-width: 220px; }
+.agent-alert strong { display: block; color: var(--bad); font-size: 15px; margin-bottom: 4px; }
+.agent-alert .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .statusline { display: flex; align-items: center; gap: 10px; margin: 0 2px 14px; flex-wrap: wrap; }
 .statusline .label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
 .add { display: flex; gap: 6px; }
@@ -195,6 +211,15 @@ details > summary { cursor: pointer; color: var(--muted); font-weight: 500; marg
   </div>
 </div></div>
 <main>
+  <div id="agent-alerts"></div>
+  <div class="agentbar panel" id="agent-bar">
+    <div class="ab-left"><span class="ab-title">Agent</span><span id="agent-state" class="pill"></span></div>
+    <div class="ab-meter"><div class="ab-meter-text" id="agent-usage"></div><div class="bar"><div id="agent-bar-fill"></div></div></div>
+    <div class="ab-budget"><label for="budget-input" data-i18n="dailyLimit"></label>
+      <input id="budget-input" type="number" min="0" step="0.5" inputmode="decimal"><span>M</span>
+      <button id="budget-save" data-i18n="budgetSave"></button></div>
+    <button id="run-now" class="primary"></button>
+  </div>
   <div class="statusline"><span class="label" data-i18n="sources"></span><span id="sources" class="meta" style="margin:0"></span></div>
   <div class="tiles" id="tiles"></div>
   <div class="section-head"><h2 id="list-title"></h2><span class="hint" id="list-hint"></span></div>
@@ -277,7 +302,16 @@ const I18N = {
     pageStale: "This page is out of date; reloading. Click again after it loads.",
     agentBlocked: "codex quota used up on every account: agent paused",
     agentTokens: "codex today {used} / {budget}", agentTokensFree: "codex today {used}",
-    agentOpen: "agent window open", agentNext: "next agent window {x}", agentPaused: "budget used, agent paused",
+    agentOpen: "agent window open", agentNext: "next agent window {x}", agentPaused: "paused: token limit used",
+    agentManual: "manual run until {x}", agentRunning: "{n} running",
+    dailyLimit: "Daily limit", budgetSave: "Save", budgetSaved: "Daily limit set to {x}",
+    runNow: "Run now", stopRun: "End manual run", runStarted: "Agent run started, until {x}", runStopped: "Manual run ended",
+    runNowHint: "Open an agent window now, as long as a scheduled one, instead of waiting for the next time slot.",
+    runNowBlocked: "Today's token limit is used: raise the daily limit first.",
+    budgetAlertTitle: "Agent paused: today's token limit is used up",
+    budgetAlertBody: "{used} used of the {budget} daily limit, so reviews, CI log reading and replies are on hold. Raise the daily limit to continue now, or wait for a new day: it resumes on its own at {x}.",
+    raiseTo: "Raise to {x} and continue", setOwnLimit: "Set the limit…",
+    quotaAlertBody: "Every codex account hit its usage limit or spend cap, so no agent job can run. Jobs retry on their own; wait for the account quota to reset, or add another account under agent.codex_homes in config.json.",
     agentHint: "Agent windows: {w}. Reviews, CI log reading, fixes and replies run only inside a window (and within the daily token budget); polling, CI commands, merges and Slack replies run all the time.",
     agentBlockedHint: "Every configured codex account hit its usage limit or spend cap; jobs retry on their own.",
     source: {slack: "Slack", "github-mention": "GitHub @", "github-assigned": "assigned on GitHub",
@@ -353,7 +387,16 @@ const I18N = {
     pageStale: "页面已过期，正在刷新，刷新后再点一次。",
     agentBlocked: "codex 账号额度都用完了：agent 暂停",
     agentTokens: "今日 codex {used} / {budget}", agentTokensFree: "今日 codex {used}",
-    agentOpen: "agent 时段进行中", agentNext: "下个 agent 时段 {x}", agentPaused: "额度用完，agent 暂停",
+    agentOpen: "agent 时段进行中", agentNext: "下个 agent 时段 {x}", agentPaused: "已暂停：token 额度用完",
+    agentManual: "手动运行中，至 {x}", agentRunning: "{n} 个任务在跑",
+    dailyLimit: "每日上限", budgetSave: "保存", budgetSaved: "每日上限已设为 {x}",
+    runNow: "立即运行一次", stopRun: "结束手动运行", runStarted: "已开始手动运行，至 {x}", runStopped: "已结束手动运行",
+    runNowHint: "现在就开一个 agent 时段（和定时时段一样长），不用等下一个时间点。",
+    runNowBlocked: "今日 token 额度已用完：请先提高每日上限。",
+    budgetAlertTitle: "agent 已暂停：今日 token 额度已用完",
+    budgetAlertBody: "今日已用 {used}，每日上限 {budget}，review、读 CI 日志、回复讨论都已暂停。提高每日上限即可马上继续，或等新的一天：{x} 自动恢复。",
+    raiseTo: "上限提高到 {x} 并继续", setOwnLimit: "自己设上限",
+    quotaAlertBody: "所有 codex 账号都到了用量上限或 spend cap，agent 任务跑不了。任务会自己重试；等账号额度重置，或在 config.json 的 agent.codex_homes 里加一个账号。",
     agentHint: "agent 时段：{w}。review、读 CI 日志、代修、回复讨论只在时段内跑，并受每日 token 上限约束；拉取、CI 命令、合并、Slack 回复随时进行。",
     agentBlockedHint: "配置的 codex 账号都到了用量上限或 spend cap；任务会自己重试。",
     source: {slack: "Slack", "github-mention": "GitHub @", "github-assigned": "GitHub 指派给你",
@@ -610,20 +653,57 @@ function renderTop() {
   const skill = state.status.skill;
   if (skill) src.append(el("span", {class: "pill", title: skill.note || t("skillTitle")},
     el("span", {class: "dot " + (skill.ok ? "ok" : "bad")}), skill.ok ? t("skill", {x: skill.commit.slice(0, 7)}) : t("skillFailed")));
-  const ag = state.agent;
-  if (ag) {
-    const fmt = n => (n / 1e6).toFixed(1) + "M";
-    const over = ag.budget && ag.tokens_today >= ag.budget;
-    const when = ag.blocked ? t("agentPaused") : !ag.windows.length ? "" : ag.open ? t("agentOpen")
-      : t("agentNext", {x: new Date(ag.next * 1000).toTimeString().slice(0, 5)});
-    src.append(el("span", {class: "pill", title: ag.blocked ? tr(ag.blocked) : t("agentHint", {w: ag.windows.join(" / ") || "—"})},
-      el("span", {class: "dot " + (over || ag.blocked ? "bad" : ag.open || !ag.windows.length ? "ok" : "")}),
-      [ag.budget ? t("agentTokens", {used: fmt(ag.tokens_today), budget: fmt(ag.budget)})
-                 : t("agentTokensFree", {used: fmt(ag.tokens_today)}), when].filter(Boolean).join(" · ")));
-  }
-  if (state.status.agent_blocked) src.append(el("span", {class: "pill", title: t("agentBlockedHint")},
-    el("span", {class: "dot bad"}), t("agentBlocked")));
+  renderAgent();
   if (state.status.last_error) src.append(el("span", {class: "pill", title: state.status.last_error}, el("span", {class: "dot bad"}), t("pipelineError")));
+}
+const fmtM = n => (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+const hhmm = ts => new Date(ts * 1000).toTimeString().slice(0, 5);
+const mmddhhmm = ts => { const d = new Date(ts * 1000);
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${hhmm(ts)}`; };
+function alertBox(title, body, ...buttons) {
+  return el("div", {class: "agent-alert", role: "alert"}, el("div", {class: "icon", "aria-hidden": "true"}, "⚠"),
+    el("div", {class: "body"}, el("strong", {}, title), el("div", {}, body)),
+    buttons.length ? el("div", {class: "actions"}, ...buttons) : null);
+}
+function renderAgent() {
+  const ag = state.agent;
+  document.getElementById("agent-bar").hidden = !ag;
+  if (!ag) return;
+  let text, dot = "";
+  if (ag.exhausted) { text = t("agentPaused"); dot = "bad"; }
+  else if (ag.manual_until) { text = t("agentManual", {x: hhmm(ag.manual_until)}); dot = "ok"; }
+  else if (!ag.windows.length || ag.open) { text = t("agentOpen"); dot = "ok"; }
+  else text = t("agentNext", {x: hhmm(ag.next)});
+  if (ag.running) text += " · " + t("agentRunning", {n: ag.running});
+  const pill = document.getElementById("agent-state");
+  pill.replaceChildren(el("span", {class: "dot " + dot}), text);
+  pill.title = t("agentHint", {w: ag.windows.join(" / ") || "—"});
+  document.getElementById("agent-usage").textContent = ag.budget
+    ? t("agentTokens", {used: fmtM(ag.tokens_today), budget: fmtM(ag.budget)}) : t("agentTokensFree", {used: fmtM(ag.tokens_today)});
+  const fill = document.getElementById("agent-bar-fill");
+  fill.style.width = ag.budget ? Math.min(100, ag.tokens_today / ag.budget * 100) + "%" : "0";
+  fill.classList.toggle("over", !!ag.exhausted);
+  const input = document.getElementById("budget-input");
+  if (document.activeElement !== input) input.value = +(ag.budget / 1e6).toFixed(2);  // never overwrite your typing
+  const run = document.getElementById("run-now");
+  run.textContent = ag.manual_until ? t("stopRun") : t("runNow");
+  run.className = ag.manual_until ? "" : "primary";
+  run.disabled = !!ag.exhausted && !ag.manual_until;
+  run.title = ag.exhausted && !ag.manual_until ? t("runNowBlocked") : t("runNowHint");
+  const alerts = document.getElementById("agent-alerts"); alerts.replaceChildren();
+  if (ag.exhausted) {
+    const raise = Math.ceil(ag.tokens_today / 1e6) + 5;  // room for a batch more
+    alerts.append(alertBox(t("budgetAlertTitle"),
+      t("budgetAlertBody", {used: fmtM(ag.tokens_today), budget: fmtM(ag.budget), x: mmddhhmm(ag.resume_at)}),
+      el("button", {class: "primary", onclick: () => setBudget(raise * 1e6)}, t("raiseTo", {x: raise + "M"})),
+      el("button", {onclick: () => { input.focus(); input.select(); }}, t("setOwnLimit"))));
+  }
+  if (state.status.agent_blocked) alerts.append(alertBox(t("agentBlocked"), t("quotaAlertBody")));
+}
+async function setBudget(tokens) {
+  try { await post("/api/agent", {action: "budget", tokens: Math.round(tokens)}); toast(t("budgetSaved", {x: fmtM(tokens)})); }
+  catch (e) { toast(t("failed", {x: e.message})); }
+  refresh();
 }
 const cardsFor = tab => state.cards.filter(c => tab.stages.includes(c.stage) && (!tab.filter || tab.filter(c)));
 const slackItems = () => state.mentions.filter(m => m.source === "slack");
@@ -941,6 +1021,20 @@ document.getElementById("add-btn").onclick = async () => {
   try { const r = await post("/api/add", {url: input.value}); toast(t("addedX", {x: r.added.join(", ")})); input.value = ""; }
   catch (e) { toast(t("failed", {x: e.message})); }
   refresh();
+};
+document.getElementById("budget-save").onclick = () => {
+  const value = parseFloat(document.getElementById("budget-input").value);
+  if (!(value >= 0)) return toast(t("failed", {x: "?"}));
+  setBudget(value * 1e6);
+};
+document.getElementById("budget-input").onkeydown = e => { if (e.key === "Enter") document.getElementById("budget-save").click(); };
+document.getElementById("run-now").onclick = async () => {
+  const stopping = !!(state.agent || {}).manual_until;
+  try {
+    const ag = await post("/api/agent", {action: stopping ? "stop_run" : "run_now"});
+    toast(stopping ? t("runStopped") : t("runStarted", {x: hhmm(ag.manual_until)}));
+  } catch (e) { toast(t("failed", {x: e.message})); }
+  setTimeout(refresh, 800);
 };
 applyStatic();
 refresh(); setInterval(refresh, 8000);

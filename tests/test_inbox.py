@@ -1217,6 +1217,33 @@ class AutonomousTest(unittest.TestCase):
         self.pipe.inflight["x#2"] = "job_fix"
         self.assertIn("token budget is used", self.pipe.agent_gate())
 
+    def test_run_now_opens_a_window_by_hand(self):
+        self.close_window()
+        self.config["agent"]["window_minutes"] = 60
+        calls, fake = self.counting_review()
+        with mock.patch.object(agent, "review", side_effect=fake):
+            self.assertIn("waiting for the next agent window", self.advance()["stage_reason"])
+            self.pipe.run_now()
+            self.assertGreater(self.pipe.agent_status()["manual_until"], time.time() + 3000)
+            self.advance()
+            self.assertEqual(len(calls), 1)
+            self.pipe.stop_run()
+            self.assertEqual(self.pipe.agent_status()["manual_until"], 0)
+            self.assertFalse(self.pipe.window_state()[0])
+
+    def test_daily_limit_is_set_from_the_page_and_kept(self):
+        self.config["agent"].update(daily_token_budget=5_000_000, token_reserve=150_000)
+        agent.usage_hook("review", 4_900_000)
+        status = self.pipe.agent_status()
+        self.assertTrue(status["exhausted"])
+        self.assertEqual((status["budget"], status["default_budget"]), (5_000_000, 5_000_000))
+        with self.assertRaises(ValueError):  # a run by hand cannot get past the cap
+            self.pipe.run_now()
+        self.pipe.set_token_budget(10_000_000)
+        self.assertFalse(self.pipe.agent_status()["exhausted"])
+        self.assertEqual(Pipeline(self.config, self.store).token_budget(), 10_000_000)  # survives a restart
+        self.pipe.run_now()
+
     def test_window_state(self):
         self.config["agent"].update(windows=["10:00", "15:00", "21:00"], window_minutes=120)
         day = datetime(2026, 10, 31)

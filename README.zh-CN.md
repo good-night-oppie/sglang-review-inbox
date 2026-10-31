@@ -170,7 +170,7 @@ macOS 可以用 launchd 开机自启，Linux 可以用 systemd 用户服务。�
 
 token 大头在 review 上，省的办法：
 
-- **时段加每日上限**：agent 的活攒到 `agent.windows` 的时段里批量跑，用到 `agent.daily_token_budget` 就停。网页顶部显示今日用量和下个时段。
+- **时段加每日上限**：agent 的活攒到 `agent.windows` 的时段里批量跑，用到 `agent.daily_token_budget` 就停。网页顶部的 agent 栏显示今日用量和上限，可以直接改每日上限（重启后保留，配置文件里的值是默认值），还有一个「立即运行一次」按钮，不用等定时时段。额度用完时页面顶部会出现红色横幅，可以一键提高上限，也会写明什么时候自动恢复。
 - **增量复审**：已 review 的 PR 推了新代码，不再从头 review。PR 自身的 diff 没变（只合了 main）就直接沿用结论，不跑 agent；有变化时，agent 只看上次 review 之后的改动并复查之前的问题，不跑语料 sweep。网页上的「重新 review」会做全量 review。
 - **CI 规则先行**：汇总状态的 job、在准备步骤就失败的 job、已知的 CI 基础设施报错，用规则归类，不调 agent；拿不到日志的失败只重跑，不交给 agent。剩下的才在时段内交给 agent 读。
 - **中文按需翻译**：只有在中文界面打开某张卡片时才翻译它。

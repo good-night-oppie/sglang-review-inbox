@@ -183,7 +183,7 @@ Everything has a default in [`inbox/config.py`](inbox/config.py); `config.json` 
 
 Most tokens go to reviews. What keeps them down:
 
-- **Windows and a daily cap.** Agent work runs in batches inside `agent.windows` and stops at `agent.daily_token_budget`. The page header shows today's usage and the next window.
+- **Windows and a daily cap.** Agent work runs in batches inside `agent.windows` and stops at `agent.daily_token_budget`. The agent bar at the top of the page shows today's usage against the cap, lets you change the daily limit (kept across restarts; the config value is the default), and has a **Run now** button that opens a window right away. When the cap is reached a red banner says so, with a one-click raise, and says when it resumes on its own.
 - **Follow-up reviews.** A new head on a reviewed PR is not reviewed from scratch. If the PR's own diff is unchanged (only main merged in), the review carries over with no agent run. Otherwise the agent reads only the change since the reviewed head and re-checks the earlier findings, without the corpus sweep. "Re-review" on the page asks for a full one.
 - **CI rules first.** Status-aggregation jobs, setup-step failures and known CI-infrastructure errors are classified without the agent; failures without a readable log are rerun, never read by the agent. The agent reads only what is left, in a window.
 - **Chinese on demand.** Agent text is translated only when you open a card in the Chinese view.

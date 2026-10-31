@@ -29,7 +29,8 @@ For each new reply decide:
 - `hold`: the concern still stands. Explain in one or two sentences what is
   still needed and why, concretely enough that the author can act on it.
 - `maintainer`: only for a real judgment call the maintainer must make
-  (direction, accepting a trade-off). Use it rarely.
+  (direction, accepting a trade-off). Use it rarely. Never for CI: commands,
+  the run-ci label, reruns and fork approvals are handled by the agent itself.
 - `none`: nothing to answer (a thanks, "updated", "rebased", a status note).
   Leave `reply` empty; no comment is posted.
 

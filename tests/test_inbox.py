@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from inbox import agent, ci, config as config_module, fixer, github, pipeline as pipeline_module  # noqa: E402
 from inbox.db import Store  # noqa: E402
-from inbox.pipeline import Pipeline, anchored, evidence_line, new_side_ranges  # noqa: E402
+from inbox.pipeline import Pipeline, anchored, evidence_line, finding_comment, new_side_ranges, plain  # noqa: E402
 from inbox.skill import SkillSync, SkillSyncError, missing_skill_steps  # noqa: E402
 from inbox.triage import triage  # noqa: E402
 
@@ -657,7 +657,7 @@ class AutonomousTest(unittest.TestCase):
             self.assertEqual(card["stage"], "needs_author")
             notes = [w[1] for w in self.writes if w[0] == "comment"]
             self.assertEqual(len(notes), 1)
-            self.assertIn("`44f5c51b` is not linked to your GitHub account", notes[0])
+            self.assertIn("commit `44f5c51b` isn't linked to your GitHub account", notes[0])
             for _ in range(4):  # retries keep it with the author, never on you, one note only
                 card = self.store.get_pr(self.key)
                 self.store.update_pr(self.key, decision=dict(card["decision"], merge_failure=dict(
@@ -771,7 +771,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(card["stage"], "needs_author")
         notes = self.comments()[1:]
         self.assertEqual(len(notes), 1)
-        self.assertTrue(notes[0].startswith("@someone these jobs still fail on"))
+        self.assertTrue(notes[0].startswith("[BBuf Review Agent] @someone these still fail after a rerun"))
         self.assertIn("Segmentation fault", notes[0])
 
     def test_failure_without_a_readable_log_is_rerun_then_watched_never_pinged(self):
@@ -909,7 +909,8 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(card["stage"], "needs_author")  # still a blocker, not approved
         event, _, body, inline = self.writes[0]
         self.assertEqual((event, inline), ("COMMENT", []))  # the inline P1 is not repeated
-        self.assertIn("Still open from the earlier review:\n- Prove the fused path runs (`a.py:3`)", body)
+        self.assertIn("Still open from my last review:\n- Prove the fused path runs (`a.py:3`)", body)
+        self.assertTrue(body.startswith("[BBuf Review Agent] One thing to fix before this can go in."))
 
     def blocker(self):
         self.verdict = "changes_needed"
@@ -930,8 +931,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(card["stage"], "queued")
         self.assertNotIn("COMMENT", [w[0] for w in self.writes])  # no findings review: fixed instead
         note = self.comments()[-1]
-        self.assertTrue(note.startswith("@someone I pushed `ffffffff` to your branch: guard the empty batch."))
-        self.assertIn("Please pull before your next push.", note)
+        self.assertTrue(note.startswith("[BBuf Review Agent] @someone I pushed `ffffffff` to your branch: Guard the empty batch. Please pull before pushing again."))
         self.advance()
         self.assertEqual(len(runs), 1)  # one attempt per head
 
@@ -963,7 +963,7 @@ class AutonomousTest(unittest.TestCase):
             card = self.advance()
             self.advance()
         self.assertEqual(len(calls), 1)  # answered once
-        self.assertEqual([w for w in self.writes if w[0] == "reply"], [("reply", 1, reply)])
+        self.assertEqual([w for w in self.writes if w[0] == "reply"], [("reply", 1, "[BBuf Review Agent] " + reply)])
         return card
 
     def test_author_is_right_so_the_finding_is_dropped_and_approved(self):
@@ -1097,7 +1097,7 @@ class AutonomousTest(unittest.TestCase):
                                "reply": "Before/after tok/s on the same GPU and command."}], "summary": ""}
         with mock.patch.object(agent, "discuss", return_value=(answer, {})):
             self.advance()
-        self.assertIn("@someone Before/after tok/s on the same GPU and command.", self.comments())
+        self.assertIn("[BBuf Review Agent] @someone Before/after tok/s on the same GPU and command.", self.comments())
 
     def test_your_hand_off_and_the_per_pr_cap_stop_agent_fixes(self):
         self.config["policy"]["auto_fix"] = True
@@ -1256,7 +1256,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(self.writes[0][0], "APPROVE")  # approval is about the code
         notes = [w[1] for w in self.writes if w[0] == "comment"]
         self.assertEqual(len(notes), 1)
-        self.assertTrue(notes[0].startswith("To move this forward, please:\n- rebase onto main"))
+        self.assertTrue(notes[0].startswith("[BBuf Review Agent] Could you rebase this onto the latest main?"))
         self.assertEqual((card["stage"], card["stage_reason"]), ("needs_author", "approved; merge conflict with main"))
         self.assertFalse(card["decision"]["merge_ready"])
         self.advance()
@@ -1288,6 +1288,24 @@ class LogPlaceholderTest(unittest.TestCase):
         self.assertFalse(github.log_missing("E   AssertionError: expected 3 got 4"))
         self.assertEqual(evidence_line({"evidence": "`AssertionError: expected 3 got 4`"}),
                          "AssertionError: expected 3 got 4")
+
+
+class CommentStyleTest(unittest.TestCase):
+    def finding(self, severity, comment, kind="bug"):
+        return {"severity": severity, "kind": kind, "category": "correctness", "comment": comment}
+
+    def test_level_markers_come_from_severity_not_the_model(self):
+        self.assertEqual(finding_comment(self.finding("blocker", "[P1] Empty batches crash here. Could we guard it?")),
+                         "Empty batches crash here. Could we guard it?")
+        self.assertEqual(finding_comment(self.finding("minor", "[P2] could this live in the base class?")),
+                         "Minor: Could this live in the base class?")
+        self.assertEqual(finding_comment(self.finding("nit", "Nit: typo in the name")), "nit: Typo in the name")
+        self.assertEqual(finding_comment(self.finding("minor", "Could we add a B200 run?", kind="evidence")),
+                         "Non-blocking: Could we add a B200 run?")
+
+    def test_em_dashes_are_rewritten(self):
+        self.assertEqual(plain("This breaks TP=7 — the layer expects 480 features."),
+                         "This breaks TP=7, the layer expects 480 features.")
 
 
 class SlackIntakeTest(unittest.TestCase):

@@ -136,6 +136,9 @@ DEFAULTS = {
         "slack_outcomes": ["approved", "changes", "bounce", "ci_related", "merged"],
         # `{login}` becomes your GitHub login; the requester is @-mentioned after it.
         "slack_prefix": "[{login} Review Agent] ",
+        # Every comment, review and reply the agent posts on GitHub starts with
+        # this (CI slash commands excepted, the bots need them bare).
+        "github_prefix": "[{login} Review Agent] ",
         # Readiness gates applied before any agent time is spent.
         "max_changed_lines": 2500,
         "require_test_plan": True,

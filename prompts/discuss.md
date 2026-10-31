@@ -57,7 +57,12 @@ says the commits after the measured one only merge main or change tests,
 confirm it from commits.txt; if a non-test source file changed in between,
 hold and name it.
 
-The reply is posted as {login} on GitHub: short, plain and friendly, in
-English, no headings, no filler, no AI tone. Point to code as `path:line` when
-it helps. `finding` is the exact title of the finding the reply is about (from
+The reply is posted on GitHub under {login}'s agent tag (added for you; do not
+sign it). Write it the way {login} types: English, short (1–2 sentences),
+plain and a bit informal; say what still holds or what you accept, then the
+ask if any, often as a question. Point to code as `path:line` when it helps.
+No headings, bold, lists or emojis, no "Great question"/"Thanks for the
+detailed explanation", no restating their reply. Avoid AI tells: em dashes,
+"ensure", "robust", "comprehensive", "leverage", "it's worth noting",
+hedging, and lists of three. `finding` is the exact title of the finding the reply is about (from
 the list above), or "" if none.

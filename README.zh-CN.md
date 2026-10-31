@@ -160,6 +160,7 @@ macOS 可以用 launchd 开机自启，Linux 可以用 systemd 用户服务。�
 | `policy.max_*_per_day`、`max_agent_fixes_per_pr` | 各类操作的上限。合并上限只算 agent 自己合的；正在跑的代修也计入代修上限。 |
 | `policy.min_merge_interval_minutes`、`policy.min_fix_interval_minutes` | 节奏：两次自动合并至少间隔这么久（默认 60 分钟）；代修一次只跑一个，两次推送至少间隔这么久（默认 15 分钟）。排队等空档的 PR 仍由 agent 处理，不会转给作者。 |
 | `policy.slack_*` | 是否以及怎样回复 Slack 线程；回复以 `slack_prefix` 开头。 |
+| `policy.github_prefix` | agent 在 GitHub 上发的 review、评论、回复都以它开头（CI 斜杠命令除外，保持原样）。行内评论不带 `[P1]`/`[P2]` 标签：必须修的 bug 直接写，小问题以 `Minor:`、`nit:` 或 `Non-blocking:` 开头。 |
 | `refresh_seconds` | 进行中的 PR、等作者的 PR 分别多久检查一次。 |
 | `server.host`、`server.port` | 默认 `127.0.0.1:8765`，请只监听本机。 |
 

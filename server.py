@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 from inbox import config as config_module  # noqa: E402
 from inbox.db import Store, pr_key  # noqa: E402
 from inbox.github import find_pr_refs  # noqa: E402
-from inbox.pipeline import Pipeline  # noqa: E402
+from inbox.pipeline import Pipeline, finding_comment  # noqa: E402
 from inbox.slack import Slack, SlackError  # noqa: E402
 
 TOKEN = ""  # set in main(); kept across restarts so an open page keeps working
@@ -123,6 +123,9 @@ class Handler(BaseHTTPRequestHandler):
             if card is None:
                 return self._send(HTTPStatus.NOT_FOUND, {"error": "unknown PR"})
             events = app["store"].events(key)
+            if (card["review"] or {}).get("findings"):  # each comment exactly as it is (or would be) posted
+                card["review"] = dict(card["review"], findings=[
+                    dict(f, comment=app["pipeline"].sign(finding_comment(f))) for f in card["review"]["findings"]])
             texts = app["pipeline"].agent_texts(card) + [
                 e["message"].removeprefix("CI triage: ") for e in events if e["message"].startswith("CI triage: ")]
             return self._send(HTTPStatus.OK, dict(card, events=events, actions=app["store"].actions(key),

@@ -21,8 +21,36 @@ from .slack import Slack, SlackError, dm_status, is_human, mention_record, menti
 from .triage import priority, triage
 
 HUNK = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
-FOOTER = "\n\n<sub>Agent-assisted pre-review, findings verified against `{head}`.</sub>"
 NO_LOG = "(not fetched: over the 20-log cap)"
+
+# GitHub text is written the way the maintainer types it. Severity tags come
+# from the finding's severity, not from the model, and em dashes are an AI tell.
+SEVERITY_TAG = re.compile(r"^\s*(?:\[P[0-3]\]|(?:nit|minor|non-blocking)\s*:)\s*", re.I)
+EM_DASH = re.compile(r"\s*—\s*")
+
+
+def plain(text):
+    """Agent-written text as posted: no leading severity tag, no em dashes."""
+    text = (text or "").strip()
+    while SEVERITY_TAG.match(text):
+        text = SEVERITY_TAG.sub("", text, count=1)
+    text = EM_DASH.sub(", ", text)
+    return text[:1].upper() + text[1:]
+
+
+def finding_comment(finding):
+    """A finding's inline text, with the one level marker a maintainer would use:
+    nothing for a must-fix bug, `Minor:`, `nit:`, or `Non-blocking:` for an ask
+    about evidence."""
+    if not agent.is_risk(finding):
+        tag = "Non-blocking: "
+    else:
+        tag = {"minor": "Minor: ", "nit": "nit: "}.get(finding["severity"], "")
+    return tag + plain(finding["comment"])
+
+
+def ask_list(asks):
+    return asks[0] if len(asks) == 1 else ", ".join(asks[:-1]) + " and " + asks[-1]
 
 
 def evidence_line(failure):
@@ -686,7 +714,7 @@ class Pipeline:
                 # Keyed by which gates fired, so a conflict that appears after a
                 # missing-tests note on the same head still gets its own reminder.
                 self.author_note(key, head, "github:bounce:" + "+".join(sorted(g["id"] for g in told)),
-                                 "To move this forward, please:\n" + "\n".join(f"- {g['ask']}" for g in told))
+                                 f"Could you {ask_list([g['ask'] for g in told])}?")
                 self.slack_reply(key, head, "bounce", reasons="; ".join(g["ask"] for g in told))
             return
 
@@ -858,12 +886,12 @@ class Pipeline:
                 continue
             if not self.store.claim_action(key, head, event):
                 continue
-            body = answer["reply"].strip()
+            body = plain(answer["reply"])
             try:
                 if reply["kind"] == "review":
-                    url = github.reply_in_thread(card["repo"], card["number"], reply["in_reply_to"], body)
+                    url = github.reply_in_thread(card["repo"], card["number"], reply["in_reply_to"], self.sign(body))
                 else:
-                    url = github.comment(card["repo"], card["number"], f"@{reply['author']} {body}")
+                    url = github.comment(card["repo"], card["number"], self.sign(f"@{reply['author']} {body}"))
             except github.GitHubError as exc:
                 self.store.finish_action(key, head, event, False)
                 self.store.add_event(key, "error", f"answering {reply['author']} failed: {exc}")
@@ -1024,7 +1052,7 @@ class Pipeline:
         elif assessment["conflict"]:
             self.store.set_stage(key, "needs_author", "approved; merge conflict with main")
             self.author_note(key, head, "github:bounce:conflict",
-                             "To move this forward, please:\n- rebase onto main and resolve the merge conflicts")
+                             "Could you rebase this onto the latest main? It conflicts with main now.")
         elif related and self.try_fix(card, snap, "ci", [
                 {"id": f"C{i + 1}", "job": f["name"], "url": f.get("url", ""), "evidence": f.get("evidence", "")}
                 for i, f in enumerate(related[:5])]):
@@ -1134,10 +1162,10 @@ class Pipeline:
             self.store.set_stage(key, "needs_author", f"GitHub blocks the merge: commit {commits} is not linked to "
                                  "a GitHub account; author asked")
             self.author_note(key, head, "github:unlinked-commits", (
-                f"@{card['author']} this is approved, but GitHub blocks the merge: commit {commits} is not linked "
-                "to your GitHub account (its author email is not on any account), and this repo needs an extra "
-                "approval for such commits. Adding that email to your account (Settings → Emails), or "
-                "re-committing with your GitHub email and pushing, should unblock it. It merges automatically after that."))
+                f"@{card['author']} this is approved, but GitHub won't merge it: commit {commits} isn't linked "
+                "to your GitHub account, and this repo needs an extra approval for that. Could you add that commit "
+                "email to your account (Settings → Emails), or recommit with your GitHub email and push? "
+                "It'll merge automatically after that."))
         elif failure["count"] >= self.MERGE_STUCK_AFTER:
             self.set_ready(card, "merge", f"auto-merge failed {failure['count']} times: {failure['error']}")
         else:
@@ -1209,11 +1237,11 @@ class Pipeline:
         self.store.add_event(key, "fix", f"agent pushed {sha[:8]}: {result['summary']}",
                              {"url": f"{card['url']}/commits/{sha}"})
         titles = {issue["id"]: issue.get("title") or issue.get("job") or issue["id"] for issue in issues}
-        lines = [f"@{card['author']} I pushed `{sha[:8]}` to your branch: {result['summary']}."]
+        summary = plain(result["summary"]).rstrip(".")
+        lines = [f"@{card['author']} I pushed `{sha[:8]}` to your branch: {summary}. Please pull before pushing again."]
         if kind != "conflict" and result["skipped"]:
-            lines.append("Still for you:")
-            lines += [f"- {titles.get(s['id'], s['id'])}: {s['reason']}" for s in result["skipped"]]
-        lines.append("Please pull before your next push. The review runs again on the new head.")
+            lines += ["", "Still open:"]
+            lines += [f"- {plain(titles.get(s['id'], s['id']))}: {plain(s['reason'])}" for s in result["skipped"]]
         self.author_note(key, head, f"github:fix:{kind}", "\n".join(lines))
         self.store.set_stage(key, "queued", f"agent pushed {sha[:8]} ({result['summary']}); reviewing the new head")
 
@@ -1354,15 +1382,13 @@ class Pipeline:
 
     def ci_note(self, card, head, failures, related):
         lines = [f"@{card['author']} " + (
-            f"these CI failures on `{head[:12]}` look related to this change:" if related else
-            f"these jobs still fail on `{head[:12]}` after a rerun, and the logs don't make it clear "
-            "whether this PR causes it. Could you take a look?")]
+            "these CI failures look related to this change, could you take a look?" if related else
+            "these still fail after a rerun, and I can't tell from the logs whether it's this PR. "
+            "Could you take a look?")]
         for failure in failures[:5]:
             evidence = evidence_line(failure)
             lines.append(f"- [`{failure['name'].split(' / ')[-1]}`]({failure.get('url', '')})"
                          + (f": `{evidence[:200]}`" if evidence else ""))
-        if related:
-            lines.append("CI and the review run again after your next push.")
         return "\n".join(lines)
 
     def auto_approve_tiers(self):
@@ -1492,9 +1518,7 @@ class Pipeline:
         card = self.store.get_pr(key)
         if not self.store.claim_action(key, head, suggestion["event"]):
             return False
-        body = suggestion["command"]
-        if suggestion["event"].startswith("ci:rerun-test"):
-            body += f"\n\nTargeted validation for `{head[:12]}`."
+        body = suggestion["command"]  # bare: the CI bots parse it
         try:
             url = github.comment(card["repo"], card["number"], body)
         except github.GitHubError as exc:
@@ -1520,17 +1544,18 @@ class Pipeline:
         # Points already raised earlier are not posted again, only listed as still open.
         new = [f for f in wanted if not f.get("raised_before")]
         again = [f for f in wanted if f.get("raised_before")]
-        inline = [{"path": f["path"], "line": f["line"], "side": "RIGHT", "body": f["comment"]}
+        inline = [{"path": f["path"], "line": f["line"], "side": "RIGHT", "body": self.sign(finding_comment(f))}
                   for f in new if f.get("anchored")]
-        loose = [f"- `{f['path']}:{f['line']}` {f['comment']}" for f in new if not f.get("anchored")]
-        p1 = any(f["severity"] in ("blocker", "major") for f in wanted)
-        body = "Please address the [P1] items, then re-ping." if p1 else "A few non-blocking notes."
+        loose = [f"- `{f['path']}:{f['line']}` {finding_comment(f)}" for f in new if not f.get("anchored")]
+        must = sum(1 for f in wanted if f["severity"] in ("blocker", "major") and agent.is_risk(f))
+        body = ("One thing to fix before this can go in." if must == 1 else
+                "A few things to fix before this can go in." if must else "A few small things, nothing blocking.")
         if loose:
             body += "\n\n" + "\n".join(loose)
         if again:
-            body += "\n\nStill open from the earlier review:\n" + "\n".join(
-                f"- {f['title']} (`{f['path']}:{f['line']}`)" for f in again)
-        body += FOOTER.format(head=head[:12])
+            body += "\n\nStill open from my last review:\n" + "\n".join(
+                f"- {plain(f['title'])} (`{f['path']}:{f['line']}`)" for f in again)
+        body = self.sign(body)
         try:
             result = github.submit_review(card["repo"], card["number"], head, "COMMENT", body, inline)
         except github.GitHubError:
@@ -1551,10 +1576,14 @@ class Pipeline:
             raise ValueError("you already approved this head on GitHub")
         if not self.store.claim_action(key, head, "review:approve"):
             raise ValueError("this head was already approved")
-        body = note or card["review"].get("approve_note") or "LGTM."
-        if not note and self.findings_review_any(key) and any(
-                f["severity"] in ("blocker", "major") and not agent.is_risk(f) for f in card["review"]["findings"]):
-            body += "\n\nThe earlier notes asking for more tests or measurements are non-blocking."
+        if note:  # typed by you: posted as is
+            body = note
+        else:
+            body = plain(card["review"].get("approve_note")) or "LGTM."
+            if self.findings_review_any(key) and any(
+                    f["severity"] in ("blocker", "major") and not agent.is_risk(f) for f in card["review"]["findings"]):
+                body += "\n\nThe earlier asks for more tests or numbers aren't blocking."
+            body = self.sign(body)
         try:
             result = github.submit_review(card["repo"], card["number"], head, "APPROVE", body)
         except github.GitHubError:
@@ -1593,6 +1622,10 @@ class Pipeline:
         self.store.set_stage(key, "closed", "merged")
         self.slack_reply(key, head, "merged")
 
+    def sign(self, text):
+        """Mark what the agent posts on GitHub as its own, like its Slack replies."""
+        return self.policy["github_prefix"].format(login=self.login) + text
+
     def author_note(self, key, head, event, text):
         """A short PR comment telling the author why the PR is stuck (live + policy)."""
         if not (is_live(self.config) and self.policy["auto_author_notes"]):
@@ -1600,7 +1633,7 @@ class Pipeline:
         card = self.store.get_pr(key)
         if not self.store.claim_action(key, head, event):
             return
-        body = f"{text}\n\n<sub>Automated pre-review for `{head[:12]}`; it re-checks when the PR is updated.</sub>"
+        body = self.sign(text)
         try:
             url = github.comment(card["repo"], card["number"], body)
         except github.GitHubError as exc:

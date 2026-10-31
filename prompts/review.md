@@ -83,11 +83,18 @@ this path or did not run the sweep is rejected.
   finding per PR. When the PR already shows reasonable evidence, ask nothing.
 - Only bugs block a PR. severity: `blocker` (bug on a realistic path: wrong
   output, crash, hang, data loss, security), `major` (likely bug in a less
-  common config), `minor`, `nit`. An `evidence` finding is at most `minor`
-  and its comment starts with `Non-blocking:`. No style-only findings.
-- `comment` is the GitHub inline comment: English, terse maintainer tone,
-  at most 4 sentences, no headings or filler. Prefix `[P1]` for blocker/major,
-  `[P2]` for minor, `Nit:` for nit. Mark advisory points "Non-blocking".
+  common config), `minor`, `nit`. An `evidence` finding is at most `minor`.
+  No style-only findings.
+- `comment` is the GitHub inline comment, typed the way the maintainer types
+  (see the skill's comment-style section): English, plain and a bit informal,
+  1–3 sentences. The concrete failure first (input, shape, config, rank count
+  and what goes wrong), then the ask, usually as a question ("Could we ...?",
+  "Can we ...?"). Write no severity tag (`[P1]`, `Minor:`, `nit:`,
+  `Non-blocking:`): one is added from `severity` and `kind`. No headings, bold,
+  lists, emojis, greetings, thanks or sign-offs. Avoid AI tells: em dashes,
+  "ensure", "robust", "comprehensive", "leverage", "crucial", "it's worth
+  noting", "this change introduces", restating what the diff does, hedging
+  ("might potentially"), and lists of three.
 
 ## CI selection
 
@@ -112,8 +119,11 @@ this path or did not run the sweep is rejected.
 - `mermaid`: one `flowchart TD` of the PR's runtime path (6–14 nodes), changed
   nodes tagged `:::changed`, every label in double quotes, legend node, and
   `classDef changed stroke-dasharray:5 5,stroke-width:2px;` at the end.
-- `approve_note`: one short English sentence for an approval body when the
-  verdict is lgtm/minor (e.g. "LGTM. Non-blocking: ..."), else "".
+- `approve_note`: the approval body when the verdict is lgtm/minor, else "".
+  "LGTM." plus at most one short plain sentence when there is something worth
+  saying (why it is safe, a follow-up, or the CI to wait for), e.g. "LGTM. The
+  new path only runs with --enable-foo, so the default is unchanged." Same
+  style rules as `comment`.
 - `corpus_synthesis`: English, 2–4 sentences: coverage line from the corpus
   sweep and the recurring maintainer concerns for this subsystem.
 - `coverage_notes`: English: what you read and checked, and what you could

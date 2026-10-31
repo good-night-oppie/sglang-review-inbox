@@ -173,6 +173,7 @@ Everything has a default in [`inbox/config.py`](inbox/config.py); `config.json` 
 | `policy.max_*_per_day`, `max_agent_fixes_per_pr` | Caps. The merge cap counts only the agent's own merges; running fixes count against the fix cap. |
 | `policy.min_merge_interval_minutes`, `policy.min_fix_interval_minutes` | Spacing: auto-merges land at least this far apart (default 60), and fixes run one at a time with pushes at least this far apart (default 15). A PR waiting for its slot stays with the agent. |
 | `policy.slack_*` | Whether and how to answer Slack threads; replies start with `slack_prefix`. |
+| `policy.github_prefix` | Starts every review, comment and reply the agent posts on GitHub (CI slash commands stay bare). Inline comments carry no `[P1]`/`[P2]` tags: a must-fix bug is plain, smaller points start with `Minor:`, `nit:` or `Non-blocking:`. |
 | `refresh_seconds` | How often active PRs and PRs waiting on the author are re-checked. |
 | `server.host`, `server.port` | Defaults `127.0.0.1:8765`. Keep it on localhost. |
 

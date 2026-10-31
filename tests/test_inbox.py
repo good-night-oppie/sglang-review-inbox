@@ -495,6 +495,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(len(self.slack.sent), 1)  # replies are not repeated
         self.pipe.merge(self.key)
         self.assertIn(("merge",), self.writes)
+        self.assertEqual(self.store.agent_merged_keys(), set())  # your click is not an agent auto-merge
 
     def failing_ci(self, classification, evidence="", completed="2026-10-30T01:00:00Z"):
         failing = dict(check("gpu-test", conclusion="FAILURE"), completedAt=completed)
@@ -560,6 +561,7 @@ class AutonomousTest(unittest.TestCase):
                          "[BBuf Review Agent] Merged <https://github.com/sgl-project/sglang/pull/7|sglang#7>, thanks!")
         self.assertEqual(len(self.slack.sent), 2)  # approved, then merged
         self.assertEqual(self.store.count_events("merge", 0), 1)
+        self.assertEqual(self.store.agent_merged_keys(), {self.key})  # shown in violet under Merged
 
     def test_auto_merge_respects_hold_markers(self):
         self.config["policy"]["auto_merge"] = True

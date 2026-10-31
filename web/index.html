@@ -16,6 +16,7 @@
   --accent: #D55816; --accent-ink: #FFFFFF; --accent-soft: #FADDCD; --rust: #A5300F;
   --peach: #F9E6DB; --peach-2: #F2CFBE;
   --ok: #2E7D4F; --ok-soft: #E3F1E8; --warn: #A86A12; --warn-soft: #FBEFD9; --bad: #B42318; --bad-soft: #FBE4E1;
+  --agent: #5B3CC4; --agent-soft: #ECE6FB;
   --code: #2A1D17; --code-ink: #F6E9DF;
   --shadow: 0 1px 2px rgba(31, 20, 16, .05), 0 4px 16px rgba(31, 20, 16, .05);
   --radius: 12px;
@@ -28,6 +29,7 @@
     --accent: #EC6E2E; --accent-ink: #1A0F0A; --accent-soft: #3D2216; --rust: #F08A5C;
     --peach: #2D1F18; --peach-2: #3A281E;
     --ok: #5CC489; --ok-soft: #173123; --warn: #E2AE52; --warn-soft: #33270F; --bad: #F2796C; --bad-soft: #3A1714;
+    --agent: #B3A1FF; --agent-soft: #2A2245;
     --code: #0F0B09; --code-ink: #F2E4D9;
     --shadow: none; color-scheme: dark;
   }
@@ -38,6 +40,7 @@
   --accent: #EC6E2E; --accent-ink: #1A0F0A; --accent-soft: #3D2216; --rust: #F08A5C;
   --peach: #2D1F18; --peach-2: #3A281E;
   --ok: #5CC489; --ok-soft: #173123; --warn: #E2AE52; --warn-soft: #33270F; --bad: #F2796C; --bad-soft: #3A1714;
+  --agent: #B3A1FF; --agent-soft: #2A2245;
   --code: #0F0B09; --code-ink: #F2E4D9;
   --shadow: none; color-scheme: dark;
 }
@@ -126,6 +129,7 @@ main { max-width: 1240px; margin: 0 auto; padding: 20px; }
 .chip.ok { background: var(--ok-soft); color: var(--ok); } .chip.warn { background: var(--warn-soft); color: var(--warn); }
 .chip.bad { background: var(--bad-soft); color: var(--bad); } .chip.accent { background: var(--accent-soft); color: var(--rust); }
 .chip.outline { background: transparent; border: 1px solid var(--line-strong); }
+.chip.agent { background: var(--agent-soft); color: var(--agent); font-weight: 600; }
 .cibar { display: inline-flex; height: 6px; width: 72px; border-radius: 3px; overflow: hidden; background: var(--line); vertical-align: middle; }
 .cibar span { display: block; height: 100%; }
 .empty { text-align: center; color: var(--muted); padding: 48px 20px; background: var(--surface); border: 1px dashed var(--line-strong);
@@ -317,6 +321,7 @@ const I18N = {
     source: {slack: "Slack", "github-mention": "GitHub @", "github-assigned": "assigned on GitHub",
       "github-review-request": "GitHub review request", manual: "added by hand"},
     byHand: "you",
+    agentMerged: "Auto-merged by the agent", mergedBy: "merged by {x}", mergedByYou: "merged by you", mergedHint: "{n} of these were auto-merged by the agent (violet).",
     polling: "Polling Slack and GitHub", addedX: "Added {x}",
   },
   zh: {
@@ -402,6 +407,7 @@ const I18N = {
     source: {slack: "Slack", "github-mention": "GitHub @", "github-assigned": "GitHub 指派给你",
       "github-review-request": "GitHub review 请求", manual: "手动添加"},
     byHand: "你",
+    agentMerged: "agent 自动合并", mergedBy: "{x} 合并的", mergedByYou: "你合并的", mergedHint: "其中 {n} 个是 agent 自动合并的（紫色标出）。",
     polling: "正在拉取 Slack 和 GitHub", addedX: "已添加 {x}",
   },
 };
@@ -579,7 +585,10 @@ const VERDICT_CLS = {lgtm: "ok", minor: "ok", changes_needed: "bad", needs_human
 const SLACK_CLS = {pending: "accent", replied: "ok", reacted: "ok", agent: "", resolved: "ok", dismissed: "outline"};
 const verdictChip = v => v && VERDICT_CLS[v] !== undefined ? chip(t("verdict." + v), VERDICT_CLS[v]) : null;
 const isMerged = c => c.stage === "closed" && c.stage_reason === "merged";
-const cardLabel = c => isMerged(c) ? t("mergedLabel") : stageLabel(c.stage, c.ready_kind || (c.decision || {}).ready_kind);
+const cardLabel = c => isMerged(c) ? (c.merged_by_agent ? t("agentMerged") : t("mergedLabel"))
+  : stageLabel(c.stage, c.ready_kind || (c.decision || {}).ready_kind);
+const mergedChip = c => !isMerged(c) ? null : c.merged_by_agent ? chip("⚙ " + t("agentMerged"), "agent")
+  : c.merged_by ? chip(c.merged_by === state.login ? t("mergedByYou") : t("mergedBy", {x: "@" + c.merged_by}), "outline") : null;
 const stageLabel = (stage, kind) => stage === "ready" ? (kind && t("ready." + kind)) || t("stage.ready") : t("stage." + stage) || stage;
 let state = null, current = "merge", openKey = null;
 
@@ -723,7 +732,9 @@ function renderTiles() {
   }
   const tab = TABS.find(x => x.id === current);
   document.getElementById("list-title").textContent = tabLabel(tab);
-  document.getElementById("list-hint").textContent = tabHint(tab);
+  const agentMergedCount = tab.id === "closed" ? cardsFor(tab).filter(c => c.merged_by_agent).length : 0;
+  document.getElementById("list-hint").textContent = tabHint(tab)
+    + (agentMergedCount ? (tabHint(tab) ? " " : "") + t("mergedHint", {n: agentMergedCount}) : "");
 }
 function requesterText(c) {
   const r = c.requesters || [];
@@ -765,11 +776,12 @@ function cardRow(c) {
     ? el("button", {class: "primary", onclick: e => { e.stopPropagation(); doAction(c.key, "merge"); }}, t("merge"))
     : c.stage === "ready" && c.ready_kind === "approve" && !c.review_stale
     ? el("button", {class: "primary", onclick: e => { e.stopPropagation(); doAction(c.key, "approve"); }}, t("approve")) : null;
-  return el("div", {class: "row", style: `--rail:${isMerged(c) ? "var(--ok)" : RAIL[c.stage] || "var(--line-strong)"}`, onclick: () => openDrawer(c.key)},
+  const rail = isMerged(c) ? (c.merged_by_agent ? "var(--agent)" : "var(--ok)") : RAIL[c.stage] || "var(--line-strong)";
+  return el("div", {class: "row", style: `--rail:${rail}`, onclick: () => openDrawer(c.key)},
     el("div", {class: "main"},
       el("div", {class: "title"}, c.title || c.key),
       el("div", {class: "meta"},
-        el("span", {class: "mono"}, "#" + c.number), c.author && el("span", {}, "@" + c.author),
+        el("span", {class: "mono"}, "#" + c.number), c.author && el("span", {}, "@" + c.author), mergedChip(c),
         c.tier && chip(c.tier, c.tier === "T3" ? "bad" : c.tier === "T2" ? "warn" : "ok"),
         verdictChip(c.verdict), blocking ? chip(t("blocking", {n: blocking}), "bad") : null,
         ciBar(c.ci_counts || {}),
@@ -778,7 +790,7 @@ function cardRow(c) {
         requesterText(c) && el("span", {}, requesterText(c)),
         c.review_stale ? chip(t("stale"), "bad") : null,
         el("span", {}, ago(c.updated_at))),
-      el("div", {class: "why"}, el("b", {style: "color:var(--rust);font-weight:600"}, cardLabel(c)),
+      el("div", {class: "why"}, el("b", {style: `color:${c.merged_by_agent && isMerged(c) ? "var(--agent)" : "var(--rust)"};font-weight:600`}, cardLabel(c)),
         c.stage_reason && !isMerged(c) ? " · " + tr(c.stage_reason) : ""),
       (c.merge_notes || []).length ? el("div", {class: "notes"}, c.merge_notes.map(n => el("div", {}, "· " + tr(n)))) : null),
     quick);
@@ -895,7 +907,8 @@ async function openDrawer(key, quiet) {
         el("button", {class: "ghost", onclick: () => doAction(c.key, "defer")}, t("defer")),
         el("button", {class: "ghost danger", onclick: () => doAction(c.key, "dismiss")}, t("dismiss")),
         ["closed", "dismissed"].includes(c.stage) ? el("button", {onclick: () => doAction(c.key, "restore")}, t("restore")) : null),
-      el("div", {class: "status"}, el("b", {}, cardLabel(c)), el("span", {}, isMerged(c) ? "" : tr(c.stage_reason)),
+      el("div", {class: "status"}, isMerged(c) && c.merged_by_agent ? mergedChip(c) : el("b", {}, cardLabel(c)),
+        el("span", {}, isMerged(c) ? "" : tr(c.stage_reason)),
         stale ? chip(t("staleChip", {a: c.review_head.slice(0, 8), b: c.head_sha.slice(0, 8)}), "bad") : null)),
     el("div", {class: "dbody"},
       (c.requesters || []).length ? card(t("whoAsked"), uniqueRequesters(c.requesters).map(r => el("div", {style: "margin-bottom:8px"},

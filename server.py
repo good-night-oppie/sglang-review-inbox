@@ -47,8 +47,10 @@ SUMMARY_FIELDS = ("key", "repo", "number", "title", "author", "url", "draft", "h
                   "requesters", "first_seen", "updated_at", "review_head")
 
 
-def card_summary(card):
+def card_summary(card, agent_merged=frozenset()):
     summary = {name: card[name] for name in SUMMARY_FIELDS}
+    summary["merged_by_agent"] = card["key"] in agent_merged
+    summary["merged_by"] = (card["meta"] or {}).get("merged_by", "")
     review = card["review"] or {}
     ci = card["ci"] or {}
     summary["verdict"] = review.get("verdict", "")
@@ -99,7 +101,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(HTTPStatus.OK, asset.read_bytes(), ASSET_TYPES[asset.suffix])
         if url.path == "/api/state":
             store, pipeline = app["store"], app["pipeline"]
-            cards = [card_summary(card) for card in store.list_prs()]
+            agent_merged = store.agent_merged_keys()
+            cards = [card_summary(card, agent_merged) for card in store.list_prs()]
             teams = {c.team_id for c in pipeline._slack if getattr(c, "team_id", None)}
             return self._send(HTTPStatus.OK, {
                 "now": time.time(),
@@ -132,8 +135,11 @@ class Handler(BaseHTTPRequestHandler):
                 e["message"].removeprefix("CI triage: ") for e in events if e["message"].startswith("CI triage: ")]
             # Chinese is translated on demand, when you open a card in the Chinese view.
             pending = parse_qs(url.query).get("lang", [""])[0] == "zh" and app["pipeline"].request_translation(key)
+            merged_by_agent = any(e["kind"] == "merge" and e["message"].startswith("agent merged") for e in events)
             return self._send(HTTPStatus.OK, dict(card, events=events, actions=app["store"].actions(key),
-                                                  zh=app["store"].translations(texts), zh_pending=pending))
+                                                  zh=app["store"].translations(texts), zh_pending=pending,
+                                                  merged_by_agent=merged_by_agent,
+                                                  merged_by=(card["meta"] or {}).get("merged_by", "")))
         return self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_POST(self):

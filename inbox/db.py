@@ -265,6 +265,13 @@ class Store:
         with self.lock:
             return self.conn.execute("SELECT 1 FROM usage LIMIT 1").fetchone() is not None
 
+    def agent_merged_keys(self):
+        """PRs the agent merged on its own (auto-merge), as opposed to by your click or on GitHub."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT DISTINCT pr_key FROM events WHERE kind='merge' AND message LIKE 'agent merged%'").fetchall()
+        return {row[0] for row in rows}
+
     def last_event_ts(self, kind, prefix=""):
         """When the latest `kind` event whose message starts with `prefix` happened, or 0."""
         with self.lock:

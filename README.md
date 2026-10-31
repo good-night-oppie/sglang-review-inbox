@@ -15,6 +15,8 @@ Review Inbox is a small local web app for an SGLang maintainer who gets more rev
 
 It acts on GitHub and Slack **as you**, through your own `gh` login and your own Slack user token. It starts in a read-only *shadow* mode. Every write it can make is behind a policy switch, and each write happens at most once.
 
+<p align="center"><img src="docs/screenshots/overview.png" alt="The Review Inbox dashboard: agent bar, intake sources, stage tiles and the PRs that need you" width="100%"></p>
+
 ## What it does
 
 - **Intake.** Slack @-mentions, DMs (including thread replies), follow-ups later in a thread that mentioned you, PRs posted in a team channel (e.g. `#pull-requests`) that nobody else was asked about, plus GitHub @-mentions and PRs assigned to you. Short "thanks / ok" messages and FYIs are not treated as asks.
@@ -39,6 +41,18 @@ ask (Slack / GitHub) ─▶ triage ─▶ agent review ─▶ verifier
                                                     │
                           merge ─▶ "Merged …, thanks!" in the Slack thread
 ```
+
+## A closer look
+
+Click a PR to open it. The panel shows the triage, what changed, an execution-flow chart of the runtime path the PR touches, and the actions you can take:
+
+<p align="center"><img src="docs/screenshots/pr-detail.png" alt="A PR opened: triage, what changed and the execution flow" width="100%"></p>
+
+Further down: every finding with its scenario, suggested fix, the verifier's reasoning and the exact comment that is (or would be) posted on GitHub, then the related tests and CI on the current head:
+
+<p align="center"><img src="docs/screenshots/pr-findings.png" alt="Review findings with the verifier's reasoning and the GitHub comment, then tests and CI" width="100%"></p>
+
+Screenshots are from a live instance on public sglang PRs; Slack names are hidden.
 
 ## Safety model
 
@@ -189,6 +203,8 @@ Most tokens go to reviews. What keeps them down:
 - **Chinese on demand.** Agent text is translated only when you open a card in the Chinese view.
 - **Lighter profiles.** `agent.profiles` can set a lower `effort` for small PRs (`T1`) and the verifier.
 
+<p align="center"><img src="docs/screenshots/agent-bar.png" alt="The agent bar with today's token usage, the daily limit and Run now, under the banner shown when the limit is used up" width="100%"></p>
+
 ## Using it outside SGLang
 
 The flow is generic, but some parts encode SGLang's conventions: CI lanes and slash commands (`inbox/ci.py`), risk areas by path (`inbox/triage.py`), and the review prompts and skill. To point it at another project, start there.
@@ -204,6 +220,7 @@ inbox/github.py      gh wrappers;  inbox/slack.py  Slack Web API;  inbox/db.py  
 inbox/fixer.py       git for agent fixes (merge, commit, fast-forward push)
 prompts/             agent prompts;  web/index.html  the dashboard (single file)
 tests/               unit tests (python3 -m unittest discover -s tests)
+docs/screenshots/    the screenshots in this README
 ```
 
 ## License

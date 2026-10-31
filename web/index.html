@@ -771,7 +771,7 @@ function renderList() {
     el("div", {class: "list"}, folded.map(cardRow))));
 }
 function cardRow(c) {
-  const blocking = c.findings.filter(f => ["blocker", "major"].includes(f.severity)).length;
+  const blocking = c.findings.filter(f => ["blocker", "major"].includes(f.severity) && f.risk !== false).length;
   const quick = (c.merge_ready || (c.stage === "ready" && c.ready_kind === "merge")) && !c.review_stale
     ? el("button", {class: "primary", onclick: e => { e.stopPropagation(); doAction(c.key, "merge"); }}, t("merge"))
     : c.stage === "ready" && c.ready_kind === "approve" && !c.review_stale

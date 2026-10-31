@@ -20,6 +20,8 @@ Review Inbox 是一个跑在你自己电脑上的小网站，给被 review 请�
 
 它**以你的身份**在 GitHub 和 Slack 上操作，用的是你自己的 `gh` 登录和 Slack 用户 token。默认从只读的「影子模式」开始；每一种写操作都有单独的开关，同一个写操作最多执行一次。
 
+<p align="center"><img src="docs/screenshots/overview.png" alt="Review Inbox 看板：agent 栏、请求来源、各阶段计数和需要你处理的 PR" width="100%"></p>
+
 ## 能做什么
 
 - **收集请求**：
@@ -61,6 +63,18 @@ Review Inbox 是一个跑在你自己电脑上的小网站，给被 review 请�
                                                   │
                         合并 ─▶ Slack 线程里回「Merged …, thanks!」
 ```
+
+## 界面细节
+
+点开一个 PR，面板里有分诊结果、改了什么、这个 PR 涉及的运行路径流程图，以及可以做的操作：
+
+<p align="center"><img src="docs/screenshots/pr-detail.png" alt="打开一个 PR：分诊、改了什么、执行流程" width="100%"></p>
+
+往下是每个问题的触发场景、修改建议、复核理由，以及会发到 GitHub 上的原文，再往下是相关测试和当前 head 的 CI：
+
+<p align="center"><img src="docs/screenshots/pr-findings.png" alt="review 发现的问题、复核理由和 GitHub 评论原文，以及测试和 CI" width="100%"></p>
+
+截图来自实际运行中的实例，PR 都是 sglang 的公开 PR；Slack 里的人名已隐去。截图是英文界面，右上角可以切到中文。
 
 ## 安全设计
 
@@ -176,6 +190,8 @@ token 大头在 review 上，省的办法：
 - **中文按需翻译**：只有在中文界面打开某张卡片时才翻译它。
 - **降低推理强度**：`agent.profiles` 里可以给小 PR（`T1`）和复核调低 `effort`。
 
+<p align="center"><img src="docs/screenshots/agent-bar.png" alt="agent 栏：今日 token 用量、每日上限和「立即运行一次」，上方是额度用完时的横幅" width="100%"></p>
+
 ## 用在 SGLang 以外的项目
 
 整体流程是通用的，但有几处写死了 SGLang 的约定：
@@ -196,6 +212,7 @@ inbox/github.py      gh 封装；  inbox/slack.py  Slack Web API；  inbox/db.py
 inbox/fixer.py       代修用的 git 操作（合并、提交、快进推送）
 prompts/             agent 的 prompt；  web/index.html  看板（单文件）
 tests/               单元测试（python3 -m unittest discover -s tests）
+docs/screenshots/    本 README 里的截图
 ```
 
 ## 许可证

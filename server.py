@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from inbox import config as config_module  # noqa: E402
+from inbox import agent, config as config_module  # noqa: E402
 from inbox.db import Store, pr_key  # noqa: E402
 from inbox.github import find_pr_refs  # noqa: E402
 from inbox.pipeline import Pipeline, finding_comment  # noqa: E402
@@ -55,7 +55,9 @@ def card_summary(card, agent_merged=frozenset()):
     ci = card["ci"] or {}
     summary["verdict"] = review.get("verdict", "")
     summary["verdict_reason"] = review.get("verdict_reason", "")
-    summary["findings"] = [{"severity": f["severity"], "verify": f["verify"]} for f in review.get("findings", [])]
+    # `risk`: a bug, the only kind that can block (an evidence ask never does)
+    summary["findings"] = [{"severity": f["severity"], "verify": f["verify"], "risk": agent.is_risk(f)}
+                           for f in review.get("findings", [])]
     summary["ci_status"] = ci.get("status", "")
     summary["ci_counts"] = (ci.get("checks") or {}).get("counts", {})
     summary["ai_signals"] = (card["triage"] or {}).get("ai_signals", [])

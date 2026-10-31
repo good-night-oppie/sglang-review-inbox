@@ -155,6 +155,8 @@ macOS 可以用 launchd 开机自启，Linux 可以用 systemd 用户服务。�
 | `agent.profiles` | 每类任务用的模型和推理强度。 |
 | `agent.service_tier` | 原样传给 codex 的 `service_tier`，比如 `priority` 更快但更贵。 |
 | `agent.max_concurrent`、`agent.daily_review_limit` | agent 并发数，以及 24 小时内最多 review 多少次。 |
+| `agent.windows`、`agent.window_minutes` | agent（codex）任务只在这些本地时间开始，比如 `["10:00", "15:00", "21:00"]`，每个时段持续 `window_minutes` 分钟；`[]` 表示随时。拉取、CI 命令、合并、Slack 回复随时进行。你在网页上操作过的卡片（重新 review、添加、恢复）一小时内不受时段限制。 |
+| `agent.daily_token_budget`、`agent.token_reserve` | 每个自然日的 codex token 硬上限（`0` 表示不限），按每次运行输出的 `tokens used` 累计；正在跑的任务先按 `token_reserve` 预占，跑完换成真实用量。 |
 | `agent.review_skill` | review skill 所在的 git 仓库、分支和目录，每 10 分钟同步一次。没按 skill 做的 review 会被作废重跑。 |
 | `policy.auto_*` | 每一类自动写操作一个开关：CI 命令、发出问题、给作者留言、回复讨论、approve、合并、代修。 |
 | `policy.max_*_per_day`、`max_agent_fixes_per_pr` | 各类操作的上限。合并上限只算 agent 自己合的；正在跑的代修也计入代修上限。 |
@@ -163,6 +165,16 @@ macOS 可以用 launchd 开机自启，Linux 可以用 systemd 用户服务。�
 | `policy.github_prefix` | agent 在 GitHub 上发的 review、评论、回复都以它开头（CI 斜杠命令除外，保持原样）。行内评论不带 `[P1]`/`[P2]` 标签：必须修的 bug 直接写，小问题以 `Minor:`、`nit:` 或 `Non-blocking:` 开头。 |
 | `refresh_seconds` | 进行中的 PR、等作者的 PR 分别多久检查一次。 |
 | `server.host`、`server.port` | 默认 `127.0.0.1:8765`，请只监听本机。 |
+
+## 节省 codex 用量
+
+token 大头在 review 上，省的办法：
+
+- **时段加每日上限**：agent 的活攒到 `agent.windows` 的时段里批量跑，用到 `agent.daily_token_budget` 就停。网页顶部显示今日用量和下个时段。
+- **增量复审**：已 review 的 PR 推了新代码，不再从头 review。PR 自身的 diff 没变（只合了 main）就直接沿用结论，不跑 agent；有变化时，agent 只看上次 review 之后的改动并复查之前的问题，不跑语料 sweep。网页上的「重新 review」会做全量 review。
+- **CI 规则先行**：汇总状态的 job、在准备步骤就失败的 job、已知的 CI 基础设施报错，用规则归类，不调 agent；拿不到日志的失败只重跑，不交给 agent。剩下的才在时段内交给 agent 读。
+- **中文按需翻译**：只有在中文界面打开某张卡片时才翻译它。
+- **降低推理强度**：`agent.profiles` 里可以给小 PR（`T1`）和复核调低 `effort`。
 
 ## 用在 SGLang 以外的项目
 

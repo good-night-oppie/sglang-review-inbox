@@ -16,6 +16,7 @@ advance it. The pipeline decides when to execute them and how often."""
 import hashlib
 import re
 
+from . import github
 from .github import summarize_checks
 
 RUN_CI_LABEL = "run-ci"
@@ -56,6 +57,43 @@ def lane_platform(check_name):
 def pr_platforms(snapshot):
     text = " ".join([snapshot.get("title") or ""] + [f.get("path", "") for f in snapshot.get("files") or []])
     return {platform for platform, hint in PLATFORM_HINTS.items() if hint.search(text)}
+
+
+# Rules that classify a CI failure without the agent. Only CI-infrastructure
+# signals: a crashed server also shows "connection reset", so generic network
+# errors are left to the agent.
+SETUP_STEP = re.compile(r"^(Set up job|Initialize containers|Run actions/checkout|Resolve runner_config|Export "
+                        r"|Download artifacts|Run \./\.github/actions/(check-pr-test-health|check-maintenance"
+                        r"|wait-for-jobs|download-[\w-]+))", re.I)
+INFRA_LOG = re.compile(r"No space left on device|lost communication with the server"
+                       r"|runner has received a shutdown signal|hosted runner encountered an error"
+                       r"|Could not resolve host: github\.com|API rate limit exceeded|Unable to download artifact"
+                       r"|Error response from daemon|failed to pull image"
+                       r"|(429|50[234]) (Client|Server) Error[^\n]*huggingface\.co", re.I)
+STATUS_JOB = re.compile(r"^(wait-for-[\w-]+|pr-test-finish|[\w-]+-finish)$")
+
+
+def rule_triage(failures):
+    """Classify what the rules can; each failure needs `log_tail` and may have
+    `failed_step`. A failure without a readable log is left `unclassified`
+    (bounded reruns, never the agent: there is nothing to read)."""
+    out = []
+    for failure in failures:
+        job, log = failure["name"].split(" / ")[-1], failure.get("log_tail") or ""
+        step = failure.get("failed_step")
+        if STATUS_JOB.match(job):
+            verdict, evidence = "unrelated", "status job that only reflects the other jobs"
+        elif step and SETUP_STEP.match(step):
+            verdict, evidence = "infra", f"failed in the setup step '{step}' before any test ran"
+        elif github.log_missing(log):
+            verdict, evidence = "unclassified", ""
+        elif match := INFRA_LOG.search(log):
+            line = next((l for l in log.splitlines() if match.group(0) in l), match.group(0))
+            verdict, evidence = "infra", line.strip()[-200:]
+        else:
+            continue
+        out.append({"name": failure["name"], "classification": verdict, "evidence": evidence, "by": "rules"})
+    return out
 
 
 def assess(card, snapshot, ci_triage=None, extra_failures=(), exhausted=(), waived=()):
@@ -119,10 +157,11 @@ def assess(card, snapshot, ci_triage=None, extra_failures=(), exhausted=(), waiv
     blocking, unrelated, retryable = [], [], []
     sig = signature(failures)
     if status == "failed":
-        classified, no_log = {}, set()
+        classified, no_log, pending = {}, set(), set()
         if ci_triage and ci_triage.get("signature") == sig:
             classified = {f["name"]: f for f in ci_triage.get("failures", [])}
             no_log = set(ci_triage.get("no_log") or [])
+            pending = set(ci_triage.get("pending") or [])  # left for the agent's next window
         for failure in failures:
             verdict = classified.get(failure["name"], {}).get("classification", "unclassified")
             evidence = classified.get(failure["name"], {}).get("evidence", "")
@@ -130,7 +169,8 @@ def assess(card, snapshot, ci_triage=None, extra_failures=(), exhausted=(), waiv
                 # No log was read: a "related" call is a guess, and there is nothing to quote.
                 verdict = "unclassified" if verdict == "related" else verdict
                 evidence = ""
-            failure = dict(failure, classification=verdict, evidence=evidence)
+            failure = dict(failure, classification=verdict, evidence=evidence,
+                           pending_agent=failure["name"] in pending)
             if any(name and name in failure["name"] for name in waived):
                 unrelated.append(dict(failure, classification="unrelated, the author explained it"))
                 continue

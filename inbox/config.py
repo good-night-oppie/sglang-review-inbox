@@ -83,6 +83,15 @@ DEFAULTS = {
         "service_tier": "",
         "max_concurrent": 2,
         "daily_review_limit": 40,
+        # Agent (codex) work runs only inside these local-time windows, each
+        # `window_minutes` long; [] = any time. Everything that costs no tokens
+        # (polling, CI commands, merges, Slack replies) runs all the time.
+        "windows": [],
+        "window_minutes": 120,
+        # Hard cap on codex tokens per local day (0 = none). Each running job
+        # holds `token_reserve` until its real count is in.
+        "daily_token_budget": 0,
+        "token_reserve": 150000,
         "max_budget_usd": 10,
         "timeout_seconds": 2700,
         # Every review uses this skill at the latest commit of `branch`

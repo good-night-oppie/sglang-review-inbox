@@ -27,6 +27,7 @@ from inbox.pipeline import Pipeline, finding_comment  # noqa: E402
 from inbox.slack import Slack, SlackError  # noqa: E402
 
 TOKEN = ""  # set in main(); kept across restarts so an open page keeps working
+RUN_NOW = 3600  # a card you act on may use the agent outside its windows for this long
 
 
 def load_token(data_dir):
@@ -107,6 +108,7 @@ class Handler(BaseHTTPRequestHandler):
                 "login": pipeline.config["github_login"],
                 "status": pipeline.status,
                 "inflight": dict(pipeline.inflight),
+                "agent": pipeline.agent_status(),  # windows, today's tokens, the budget
                 "slack_workspaces": [getattr(c, "team", "") or "?" for c in pipeline._slack],
                 "review_max_age_days": pipeline.config["sources"]["slack"]["review_max_age_days"],
                 "policy": {k: v for k, v in pipeline.policy.items() if k.startswith(("auto_", "slack_"))},
@@ -128,8 +130,10 @@ class Handler(BaseHTTPRequestHandler):
                     dict(f, comment=app["pipeline"].sign(finding_comment(f))) for f in card["review"]["findings"]])
             texts = app["pipeline"].agent_texts(card) + [
                 e["message"].removeprefix("CI triage: ") for e in events if e["message"].startswith("CI triage: ")]
+            # Chinese is translated on demand, when you open a card in the Chinese view.
+            pending = parse_qs(url.query).get("lang", [""])[0] == "zh" and app["pipeline"].request_translation(key)
             return self._send(HTTPStatus.OK, dict(card, events=events, actions=app["store"].actions(key),
-                                                  zh=app["store"].translations(texts)))
+                                                  zh=app["store"].translations(texts), zh_pending=pending))
         return self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_POST(self):
@@ -172,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
                 store.ensure_pr(repo, number, requester={
                     "id": f"manual:{repo}#{number}", "source": "manual",  # adding again is not a new ask
                     "author": body.get("who") or "added by hand", "text": body["url"][:300], "ts": time.time()})
+                card = store.get_pr(pr_key(repo, number))
+                store.update_pr(card["key"], decision=dict(card["decision"], run_now_until=time.time() + RUN_NOW))
             pipeline.kick()
             return {"added": [pr_key(*ref) for ref in refs]}
         if path == "/api/action":
@@ -241,11 +247,13 @@ class Handler(BaseHTTPRequestHandler):
             result = None
         elif action == "force_review":
             decision["force_review_head"] = card["head_sha"]
+            decision["run_now_until"] = time.time() + RUN_NOW
             store.add_event(key, "decision", "you asked to review despite the gates")
             result = None
-        elif action == "rereview":
+        elif action == "rereview":  # a full review, now, even outside the agent windows
             store.update_pr(key, review_head="")
-            decision.update(error_count=0, waiting_author_head="")
+            decision.update(error_count=0, waiting_author_head="", full_review=True,
+                            run_now_until=time.time() + RUN_NOW)
             store.add_event(key, "decision", "you asked for a re-review")
             result = None
         elif action in ("defer", "dismiss"):
@@ -253,13 +261,14 @@ class Handler(BaseHTTPRequestHandler):
             result = None
         elif action == "restore":
             store.set_stage(key, "new", "you restored this card")
-            decision["waiting_author_head"] = ""
+            decision.update(waiting_author_head="", run_now_until=time.time() + RUN_NOW)
             result = None
         else:
             raise ValueError(f"unknown action {action}")
         store.update_pr(key, decision=dict(store.get_pr(key)["decision"], **{
             k: v for k, v in decision.items()
-            if k in ("refresh", "force_review_head", "error_count", "waiting_author_head")}))
+            if k in ("refresh", "force_review_head", "error_count", "waiting_author_head", "full_review",
+                     "run_now_until")}))
         pipeline.kick()
         return result
 
@@ -274,6 +283,7 @@ def main():
     TOKEN = load_token(config["data_dir"])
     store = Store(Path(config["data_dir"]) / "inbox.sqlite3")
     pipeline = Pipeline(config, store)
+    pipeline.backfill_usage(Path(config["data_dir"]) / "runs")
     if not args.no_pipeline:
         pipeline.start()
     server = ThreadingHTTPServer((config["server"]["host"], config["server"]["port"]), Handler)

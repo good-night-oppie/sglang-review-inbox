@@ -3,6 +3,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -434,8 +435,10 @@ class AutonomousTest(unittest.TestCase):
         self.rerun = {"state": "missing", "url": "", "runs": []}
         self.held, self.targeted_jobs, self.discussion = [], [], []
         self.push_target = {"url": "https://github.com/someone/sglang.git", "branch": "b", "fork": "someone/sglang"}
+        self.failed_step = "Run test"
         patches = [
             mock.patch.object(github, "push_target", side_effect=lambda *a: self.push_target),
+            mock.patch.object(github, "failed_step", side_effect=lambda url: self.failed_step),
             mock.patch.object(github, "discussion", side_effect=lambda *a: list(self.discussion)),
             mock.patch.object(github, "reply_in_thread",
                               side_effect=lambda r, n, cid, body: self.writes.append(("reply", cid, body)) or "u"),
@@ -521,8 +524,12 @@ class AutonomousTest(unittest.TestCase):
 
         with mock.patch.object(agent, "translate_zh", side_effect=fake):
             self.pipe.queue_translation()
+            self.assertEqual(calls, [])  # nothing is translated until someone opens it in Chinese
+            self.assertTrue(self.pipe.request_translation(self.key))
+            self.pipe.queue_translation()
             self.pipe.queue_translation()
         self.assertEqual(len(calls), 1)
+        self.assertFalse(self.pipe.request_translation(self.key))  # all there now
         self.assertIn("Off by one", calls[0])
         self.assertNotIn("[P2] off by one", calls[0])  # what gets posted on GitHub stays English
         self.assertEqual(self.store.translations(["Off by one"]), {"Off by one": "中文：Off by one"})
@@ -534,6 +541,7 @@ class AutonomousTest(unittest.TestCase):
         stage = self.store.get_pr(self.key)["stage"]
         self.pipe.translator = SyncExecutor()
         with mock.patch.object(agent, "translate_zh", side_effect=agent.AgentError("boom")):
+            self.pipe.request_translation(self.key)
             self.pipe.queue_translation()
         self.assertEqual(self.store.get_pr(self.key)["stage"], stage)
         self.assertIn("boom", self.pipe.status["translate_error"])
@@ -1164,6 +1172,194 @@ class AutonomousTest(unittest.TestCase):
         self.advance()
         self.assertEqual(sum(w[0] == "COMMENT" for w in self.writes), 1)
 
+    # ---- agent budget: windows, token cap, follow-up reviews, CI rules --------
+    def close_window(self):
+        later = (datetime.now() + timedelta(hours=3)).strftime("%H:%M")
+        self.config["agent"].update(windows=[later], window_minutes=60)
+        return later
+
+    def counting_review(self):
+        calls = []
+        original = self.fake_agent_review
+        return calls, lambda *a: calls.append(a) or original(*a)
+
+    def test_agent_waits_for_its_window_unless_you_asked(self):
+        later = self.close_window()
+        calls, fake = self.counting_review()
+        with mock.patch.object(agent, "review", side_effect=fake):
+            card = self.advance()
+            self.assertEqual(calls, [])
+            self.assertEqual((card["stage"], card["stage_reason"]),
+                             ("queued", f"waiting for the next agent window ({later})"))
+            self.store.update_pr(self.key, decision=dict(card["decision"], run_now_until=time.time() + 600))
+            self.advance()  # you clicked something on this card: it runs now
+        self.assertEqual(len(calls), 1)
+
+    def test_daily_token_budget_is_a_hard_stop(self):
+        self.config["agent"].update(daily_token_budget=1_000_000, token_reserve=150_000)
+        agent.usage_hook("review", 900_000)  # every codex run reports here
+        self.assertEqual(self.store.tokens_since(self.pipe.day_start()), 900_000)
+        calls, fake = self.counting_review()
+        with mock.patch.object(agent, "review", side_effect=fake):
+            card = self.advance()
+        self.assertEqual(calls, [])
+        self.assertTrue(card["stage_reason"].startswith("today's agent token budget is used (0.9M of 1M)"))
+        self.store.update_pr(self.key, decision=dict(card["decision"], run_now_until=time.time() + 600))
+        with mock.patch.object(agent, "review", side_effect=fake):
+            self.advance()
+        self.assertEqual(calls, [])  # asking for it skips the window, never the budget
+
+    def test_running_jobs_hold_part_of_the_budget(self):
+        self.config["agent"].update(daily_token_budget=400_000, token_reserve=150_000)
+        self.assertEqual(self.pipe.agent_gate(), "")
+        self.pipe.inflight["x#1"] = "job_review"
+        self.assertEqual(self.pipe.agent_gate(), "")
+        self.pipe.inflight["x#2"] = "job_fix"
+        self.assertIn("token budget is used", self.pipe.agent_gate())
+
+    def test_window_state(self):
+        self.config["agent"].update(windows=["10:00", "15:00", "21:00"], window_minutes=120)
+        day = datetime(2026, 10, 31)
+        at = lambda h, m: day.replace(hour=h, minute=m).timestamp()  # noqa: E731
+        self.assertEqual(self.pipe.window_state(at(11, 30)), (True, at(15, 0)))
+        self.assertEqual(self.pipe.window_state(at(12, 30)), (False, at(15, 0)))
+        self.assertEqual(self.pipe.window_state(at(23, 30)), (False, (day + timedelta(days=1)).replace(hour=10).timestamp()))
+        self.assertEqual(self.pipe.window_state(at(22, 59)), (True, (day + timedelta(days=1)).replace(hour=10).timestamp()))
+
+    def reviewed_then_pushed(self, published=False):
+        self.verdict = "changes_needed"
+        self.findings = [{"severity": "blocker", "category": "correctness", "path": "a.py", "line": 3,
+                          "title": "Empty batch crashes", "scenario": "s", "evidence": "", "fix": "guard it",
+                          "comment": "[P1] x", "kind": "bug"}]
+        self.advance()
+        if published:
+            self.assertEqual(self.advance()["stage"], "needs_author")  # findings posted on the PR
+        card = self.store.get_pr(self.key)
+        self.store.update_pr(self.key, review=dict(card["review"], diff_fp="fp-1"))
+        self.snap = snapshot(head=NEW_HEAD, labels=["run-ci"], rollup=[check("unit")])
+
+    def test_head_that_only_merged_main_keeps_its_review(self):
+        self.reviewed_then_pushed(published=True)
+        calls, fake = self.counting_review()
+        with mock.patch.object(FakeWorkspace, "diff_fingerprint", create=True, new=lambda ws: "fp-1"), \
+                mock.patch.object(agent, "review", side_effect=fake):
+            card = self.advance()
+        self.assertEqual(calls, [])
+        self.assertEqual(card["review_head"], NEW_HEAD)
+        self.assertEqual(card["review"]["findings"][0]["title"], "Empty batch crashes")
+        self.assertTrue(card["review"]["findings"][0]["raised_before"])  # posted already: not posted again
+        self.assertEqual(self.store.count_events("review", 0), 1)  # a carry-over is not a review run
+        card = self.advance()
+        self.assertEqual(sum(w[0] == "COMMENT" for w in self.writes), 1)  # nothing new: no second review posted
+        self.assertEqual((card["stage"], card["stage_reason"]),
+                         ("needs_author", "blocking issues confirmed, already posted, waiting for the author"))
+        self.assertIn("only main was merged in", " ".join(e["message"] for e in self.store.events(self.key, 20)))
+
+    def test_new_head_gets_a_follow_up_review_of_the_delta_only(self):
+        self.reviewed_then_pushed(published=True)
+        delta_calls, full_calls, verified = [], [], []
+
+        def fake_delta(config, workspace, tier, skill_dir, since, previous):
+            delta_calls.append((since, [f["title"] for f in previous]))
+            return ({"summary": "- guards the batch", "mermaid": "", "corpus_synthesis": "", "verdict": "changes_needed",
+                     "verdict_reason": "", "test_gaps": [], "related_tests": [], "targeted_tests": [],
+                     "approve_note": "", "coverage_notes": "",
+                     "findings": [dict(self.findings[0], line=5),
+                                  {"severity": "major", "category": "correctness", "path": "a.py", "line": 9,
+                                   "title": "New off-by-one", "scenario": "s", "evidence": "", "fix": "",
+                                   "comment": "x", "kind": "bug", "raised_before": False}]}, {"seconds": 1})
+
+        def fake_verify(config, workspace, findings):
+            verified.append([f["title"] for f in findings])
+            return {"verdicts": [{"index": i, "verdict": "confirmed", "reason": "ok"} for i in range(len(findings))]}, {}
+
+        with mock.patch.object(FakeWorkspace, "diff_fingerprint", create=True, new=lambda ws: "fp-2"), \
+                mock.patch.object(FakeWorkspace, "prepare_delta", create=True, new=lambda ws, since: "+guard\n"), \
+                mock.patch.object(agent, "review_delta", side_effect=fake_delta), \
+                mock.patch.object(agent, "verify", side_effect=fake_verify), \
+                mock.patch.object(agent, "review", side_effect=lambda *a: full_calls.append(a)):
+            card = self.advance()
+        self.assertEqual(full_calls, [])
+        self.assertEqual(delta_calls, [(HEAD, ["Empty batch crashes"])])
+        self.assertEqual(verified, [["New off-by-one"]])  # the carried finding keeps its verification
+        titles = {f["title"]: f for f in card["review"]["findings"]}
+        self.assertEqual(titles["Empty batch crashes"]["verify"], "confirmed")
+        self.assertTrue(titles["Empty batch crashes"]["raised_before"])  # already posted: not posted again
+        self.assertEqual((card["review_head"], card["review"]["delta_since"]), (NEW_HEAD, HEAD))
+        self.assertIn("Since aaaaaaaa:", card["review"]["summary"])
+
+    def test_empty_delta_keeps_the_review_without_the_agent(self):
+        self.reviewed_then_pushed()
+        with mock.patch.object(FakeWorkspace, "diff_fingerprint", create=True, new=lambda ws: "fp-2"), \
+                mock.patch.object(FakeWorkspace, "prepare_delta", create=True, new=lambda ws, since: ""), \
+                mock.patch.object(agent, "review_delta", side_effect=AssertionError("no agent")), \
+                mock.patch.object(agent, "review", side_effect=AssertionError("no agent")):
+            card = self.advance()
+        self.assertEqual(card["review_head"], NEW_HEAD)
+
+    def test_rereview_is_a_full_review(self):
+        self.reviewed_then_pushed()
+        card = self.store.get_pr(self.key)
+        self.store.update_pr(self.key, review_head="", decision=dict(card["decision"], full_review=True))
+        calls, fake = self.counting_review()
+        with mock.patch.object(FakeWorkspace, "diff_fingerprint", create=True, new=lambda ws: "fp-1"), \
+                mock.patch.object(FakeWorkspace, "prepare_delta", create=True, new=lambda ws, since: "+x\n"), \
+                mock.patch.object(agent, "review_delta", side_effect=AssertionError("full review wanted")), \
+                mock.patch.object(agent, "review", side_effect=fake):
+            card = self.advance()
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(card["decision"].get("full_review"))
+
+    def test_setup_step_failures_are_classified_without_the_agent(self):
+        self.failed_step = "Run ./.github/actions/check-pr-test-health"
+        self.failing_ci("unknown")
+        with mock.patch.object(agent, "triage_ci", side_effect=AssertionError("rules should decide")), \
+                mock.patch.object(github, "failed_job_log", return_value="Health check failed"):
+            self.advance()
+            card = self.advance()
+            card = self.advance()
+        triage = card["ci"]["triage"]
+        self.assertEqual(([f["classification"] for f in triage["failures"]], triage["pending"]), (["infra"], []))
+        self.assertIn("/rerun-failed-ci", self.comments())
+
+    def test_failures_rules_cannot_read_wait_for_the_agent_window(self):
+        self.failing_ci("unknown")
+        later = self.close_window()
+        card = self.store.get_pr(self.key)
+        self.store.update_pr(self.key, decision=dict(card["decision"], run_now_until=time.time() + 600))
+        calls = []
+        triage = {"failures": [{"name": self.failing_ci("unknown")["failures"][0]["name"],
+                                "classification": "related", "evidence": "AssertionError: 3 != 4"}], "summary": "s"}
+        with mock.patch.object(agent, "triage_ci", side_effect=lambda *a: calls.append(a) or (triage, {})), \
+                mock.patch.object(github, "failed_job_log", return_value="E   AssertionError: 3 != 4"):
+            self.advance()  # reviewed now (you asked), approved
+            self.store.update_pr(self.key, decision=dict(self.store.get_pr(self.key)["decision"], run_now_until=0))
+            card = self.advance()  # CI failure: rules leave it, the agent waits for its window
+            self.assertEqual(calls, [])
+            self.assertEqual(card["ci"]["triage"]["pending"], [triage["failures"][0]["name"]])
+            card = self.advance()
+            self.assertEqual(self.comments(), ["/rerun-failed-ci"])  # one fresh run meanwhile, free
+            self.failing_ci("unknown", completed="2099-01-01T00:00:00Z")
+            card = self.advance()
+            self.assertEqual(card["stage_reason"],
+                             f"1 CI failure(s) still failing after a rerun; waiting for the next agent window ({later})")
+            self.config["agent"]["windows"] = []  # the window opens
+            self.advance()
+            card = self.advance()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(card["stage"], "needs_author")
+
+    def test_agent_fix_waits_for_the_window_instead_of_going_to_the_author(self):
+        self.config["policy"]["auto_fix"] = True
+        self.blocker()
+        self.pipe.run_fix = lambda *a: self.fail("outside the window")
+        self.advance()  # reviewed (window still open)
+        later = self.close_window()
+        card = self.advance()
+        self.assertEqual((card["stage"], card["stage_reason"]),
+                         ("queued", f"agent will fix the verified review findings; waiting for the next agent window ({later})"))
+        self.assertNotIn("COMMENT", [w[0] for w in self.writes])
+
     def test_agent_resolves_conflicts_on_an_approved_pr(self):
         self.config["policy"]["auto_fix"] = True
         self.snap = snapshot(labels=["run-ci"], rollup=[check("unit")], mergeable="CONFLICTING")
@@ -1306,6 +1502,34 @@ class CommentStyleTest(unittest.TestCase):
     def test_em_dashes_are_rewritten(self):
         self.assertEqual(plain("This breaks TP=7 — the layer expects 480 features."),
                          "This breaks TP=7, the layer expects 480 features.")
+
+
+class TokenMeterTest(unittest.TestCase):
+    def test_tokens_used_reads_the_codex_footer(self):
+        self.assertEqual(agent.tokens_used("...\ncodex\n{}\ntokens used\n21,365\n"), 21365)
+        self.assertEqual(agent.tokens_used("no footer"), 0)
+
+    def test_fingerprint_ignores_where_main_is(self):
+        a = "diff --git a/x b/x\nindex 111..222 100644\n@@ -10,3 +10,4 @@ def f():\n+    return 1\n"
+        b = "diff --git a/x b/x\nindex 333..444 100644\n@@ -40,3 +41,4 @@ def f():\n+    return 1\n"
+        c = "diff --git a/x b/x\nindex 333..444 100644\n@@ -40,3 +41,4 @@ def f():\n+    return 2\n"
+        self.assertEqual(agent.fingerprint(a), agent.fingerprint(b))
+        self.assertNotEqual(agent.fingerprint(a), agent.fingerprint(c))
+
+
+class CIRulesTest(unittest.TestCase):
+    def test_rules(self):
+        failures = [
+            {"name": "PR Test / pr-test-finish", "log_tail": "x"},
+            {"name": "PR Test / gpu (1)", "log_tail": "x", "failed_step": "Set up job"},
+            {"name": "PR Test / gpu (2)", "log_tail": "(log fetch failed: log not found: 1)"},
+            {"name": "PR Test / gpu (3)", "log_tail": "a\nOSError: [Errno 28] No space left on device\nb"},
+            {"name": "PR Test / gpu (4)", "log_tail": "requests.exceptions.ConnectionError: Connection reset by peer"},
+            {"name": "PR Test / gpu (5)", "log_tail": "AssertionError: 3 != 4", "failed_step": "Run test"},
+        ]
+        ruled = {r["name"].split(" / ")[-1]: r["classification"] for r in ci.rule_triage(failures)}
+        self.assertEqual(ruled, {"pr-test-finish": "unrelated", "gpu (1)": "infra", "gpu (2)": "unclassified",
+                                 "gpu (3)": "infra"})  # a reset connection may be a crashed server: the agent decides
 
 
 class SlackIntakeTest(unittest.TestCase):

@@ -276,6 +276,9 @@ const I18N = {
     posted: "Findings posted ↗", handToAuthor: "Wait on author",
     pageStale: "This page is out of date; reloading. Click again after it loads.",
     agentBlocked: "codex quota used up on every account: agent paused",
+    agentTokens: "codex today {used} / {budget}", agentTokensFree: "codex today {used}",
+    agentOpen: "agent window open", agentNext: "next agent window {x}", agentPaused: "budget used, agent paused",
+    agentHint: "Agent windows: {w}. Reviews, CI log reading, fixes and replies run only inside a window (and within the daily token budget); polling, CI commands, merges and Slack replies run all the time.",
     agentBlockedHint: "Every configured codex account hit its usage limit or spend cap; jobs retry on their own.",
     source: {slack: "Slack", "github-mention": "GitHub @", "github-assigned": "assigned on GitHub",
       "github-review-request": "GitHub review request", manual: "added by hand"},
@@ -349,6 +352,9 @@ const I18N = {
     posted: "问题已发出 ↗", handToAuthor: "移到等作者",
     pageStale: "页面已过期，正在刷新，刷新后再点一次。",
     agentBlocked: "codex 账号额度都用完了：agent 暂停",
+    agentTokens: "今日 codex {used} / {budget}", agentTokensFree: "今日 codex {used}",
+    agentOpen: "agent 时段进行中", agentNext: "下个 agent 时段 {x}", agentPaused: "额度用完，agent 暂停",
+    agentHint: "agent 时段：{w}。review、读 CI 日志、代修、回复讨论只在时段内跑，并受每日 token 上限约束；拉取、CI 命令、合并、Slack 回复随时进行。",
     agentBlockedHint: "配置的 codex 账号都到了用量上限或 spend cap；任务会自己重试。",
     source: {slack: "Slack", "github-mention": "GitHub @", "github-assigned": "GitHub 指派给你",
       "github-review-request": "GitHub review 请求", manual: "手动添加"},
@@ -370,10 +376,12 @@ const ZH_RULES = [
   [/^agent will (.+?); next fix slot after the running fix$/g, "agent 稍后会自己$1，等当前代修跑完"],
   [/^agent will (.+?); next fix slot (\d\d:\d\d)$/g, "agent 稍后会自己$1，下一个代修空档 $2"],
   [/^agent can't push to this branch \(maintainer edits are off\)/g, "作者没开 maintainer 编辑权限，agent 推不了代码"],
+  [/^agent will (.+?); waiting for /g, "agent 稍后会自己$1；waiting for "],
   [/^agent could not /g, "agent 没能"],
   [/; asking the author/g, "，改为请作者处理"],
   [/needs your look: /g, "需要你看："],
   [/blocking issues confirmed, posted on the PR, waiting for the author/g, "阻塞问题已确认并发到 PR，等作者处理"],
+  [/blocking issues confirmed, already posted, waiting for the author/g, "阻塞问题已确认，之前已发到 PR，等作者处理"],
   [/blocking issues confirmed/g, "阻塞问题已确认"],
   [/approved; merge conflict with main/g, "已 approve；与 main 冲突，已提醒作者 rebase"],
   [/CI failures related to the change \((.+?)\); author pinged/g, "CI 失败与改动相关（$1），已 @ 作者"],
@@ -406,7 +414,18 @@ const ZH_RULES = [
   [/no blocking issues, ready to approve/g, "没有阻塞问题，可以 approve"],
   [/daily agent-review budget used \((\d+)\/24h\), queued/g, "今日 agent review 额度已用完（$1/24h），排队中"],
   [/waiting for agent review \((T\d)\)/g, "等待 agent review（$1）"],
+  [/agent reviewing \((T\d), (\w+)\), follow-up since ([0-9a-f]{8})/g, "agent 增量复审中（$1，$2，自 $3 起）"],
   [/agent reviewing \((T\d), (\w+)\)/g, "agent review 中（$1，$2）"],
+  [/waiting for the next agent window \((\d\d:\d\d)\)/g, "等下一个 agent 时段（$1）"],
+  [/today's agent token budget is used \(([\d.]+M) of ([\d.]+M)\); next agent run ([\d-]+ \d\d:\d\d)/g, "今日 agent token 额度已用完（$1 / $2），下次运行 $3"],
+  [/(\d+) (?:CI failure\(s\)|个 CI 失败) still failing after a rerun; /g, "$1 个 CI 失败重跑后仍失败；"],
+  [/the agent is reading the logs/g, "agent 正在读日志"],
+  [/^review carried over to ([0-9a-f]{8}): the PR's own diff is unchanged since ([0-9a-f]{8}), only main was merged in/g, "review 沿用到 $1：PR 自身的 diff 自 $2 以来没变，只是合入了 main"],
+  [/^review carried over to ([0-9a-f]{8}): no change in the PR's files since ([0-9a-f]{8})/g, "review 沿用到 $1：自 $2 以来 PR 涉及的文件没有变化"],
+  [/^agent follow-up review since ([0-9a-f]{8}) done: (\w+), (\d+) finding\(s\) kept, (\d+) rejected by the verifier/g, "agent 增量复审（自 $1 起）完成：$2，保留 $3 个问题，复核否掉 $4 个"],
+  [/(\d+) failure\(s\) classified by rules \(([^)]+)\)/g, "$1 个失败按规则归类（$2）"],
+  [/; (\d+) left for the agent's next window/g, "；$1 个留给下个 agent 时段"],
+  [/(\d+) failure\(s\) left for the agent's next window/g, "$1 个失败留给下个 agent 时段"],
   [/approved, tracking CI until mergeable/g, "已 approve，跟踪 CI 直到可合并"],
   [/you already approved this head on GitHub/g, "你已在 GitHub 上 approve 过这个 head"],
   [/^failure #(\d+): /g, "第 $1 次出错，自动重试中："],
@@ -591,6 +610,17 @@ function renderTop() {
   const skill = state.status.skill;
   if (skill) src.append(el("span", {class: "pill", title: skill.note || t("skillTitle")},
     el("span", {class: "dot " + (skill.ok ? "ok" : "bad")}), skill.ok ? t("skill", {x: skill.commit.slice(0, 7)}) : t("skillFailed")));
+  const ag = state.agent;
+  if (ag) {
+    const fmt = n => (n / 1e6).toFixed(1) + "M";
+    const over = ag.budget && ag.tokens_today >= ag.budget;
+    const when = ag.blocked ? t("agentPaused") : !ag.windows.length ? "" : ag.open ? t("agentOpen")
+      : t("agentNext", {x: new Date(ag.next * 1000).toTimeString().slice(0, 5)});
+    src.append(el("span", {class: "pill", title: ag.blocked ? tr(ag.blocked) : t("agentHint", {w: ag.windows.join(" / ") || "—"})},
+      el("span", {class: "dot " + (over || ag.blocked ? "bad" : ag.open || !ag.windows.length ? "ok" : "")}),
+      [ag.budget ? t("agentTokens", {used: fmt(ag.tokens_today), budget: fmt(ag.budget)})
+                 : t("agentTokensFree", {used: fmt(ag.tokens_today)}), when].filter(Boolean).join(" · ")));
+  }
   if (state.status.agent_blocked) src.append(el("span", {class: "pill", title: t("agentBlockedHint")},
     el("span", {class: "dot bad"}), t("agentBlocked")));
   if (state.status.last_error) src.append(el("span", {class: "pill", title: state.status.last_error}, el("span", {class: "dot bad"}), t("pipelineError")));
@@ -736,11 +766,14 @@ async function doAction(key, action, extra = {}) {
 // the same person asking again through the same channel is one row (newest kept)
 const uniqueRequesters = list => [...new Map(list.map(r => [`${r.source}|${r.author}|${r.text || ""}`, r])).values()];
 function card(title, ...children) { return el("section", {class: "panel card"}, el("h3", {}, title), ...children); }
+let zhTimer = null;  // Chinese is translated when you open a card; the drawer refetches until it lands
 async function openDrawer(key, quiet) {
   openKey = key;
-  const res = await fetch("/api/pr?key=" + encodeURIComponent(key));
+  const res = await fetch("/api/pr?key=" + encodeURIComponent(key) + (lang === "zh" ? "&lang=zh" : ""));
   if (!res.ok) return;
   const c = await res.json();
+  clearTimeout(zhTimer);
+  if (c.zh_pending) zhTimer = setTimeout(() => { if (openKey === key) openDrawer(key, true); }, 8000);
   const d = document.getElementById("drawer");
   const sig = JSON.stringify([c.updated_at, c.events.length, lang, Object.keys(c.zh || {}).length]);
   if (quiet && d.dataset.sig === sig) return;

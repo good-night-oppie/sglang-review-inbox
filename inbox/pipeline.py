@@ -122,6 +122,8 @@ class Pipeline:
         self._pr_states = {}  # PR state cache for Slack mentions without a card
         self.skills = SkillSync(config) if config["agent"]["review_skill"].get("repo") else None
         self.config["mode"] = store.get_kv("mode", config["mode"])
+        self.translate_wanted = set()  # cards someone opened in the Chinese view
+        agent.usage_hook = self.record_usage
 
     # ---- loop -------------------------------------------------------------
     def start(self):
@@ -188,23 +190,39 @@ class Pipeline:
         texts.append(((card["ci"] or {}).get("triage") or {}).get("summary"))
         return [text for text in dict.fromkeys(texts) if isinstance(text, str) and text.strip()]
 
-    TRANSLATE_ORDER = {"ready": 0, "needs_author": 1, "approved": 2, "queued": 3, "reviewing": 3}
+    def missing_translations(self, key):
+        card = self.store.get_pr(key)
+        if card is None:
+            return []
+        texts = self.agent_texts(card)
+        known = self.store.translations(texts)
+        return [text for text in texts if text not in known]
+
+    def request_translation(self, key):
+        """On demand: a card opened in the Chinese view. True while its text is
+        still being translated."""
+        if not self.config["agent"].get("translate_zh", True) or not self.missing_translations(key):
+            return False
+        self.translate_wanted.add(key)
+        self.wake.set()
+        return True
 
     def queue_translation(self):
-        """Translate one card's missing agent text per tick, cards that need you first."""
-        if not self.config["agent"].get("translate_zh", True) or self.translating:
+        """Translate the cards someone opened in the Chinese view, one at a
+        time; the token budget applies, the agent windows do not."""
+        if self.translating or not self.translate_wanted or self.agent_gate(window=False):
             return
         now = time.time()
-        cards = sorted(self.store.list_prs(), key=lambda c: (self.TRANSLATE_ORDER.get(c["stage"], 4), -c["updated_at"]))
-        for card in cards:
-            if self.translate_after.get(card["key"], 0) > now:
+        for key in list(self.translate_wanted):
+            missing = self.missing_translations(key)
+            if not missing:
+                self.translate_wanted.discard(key)
                 continue
-            texts = self.agent_texts(card)
-            missing = [text for text in texts if text not in self.store.translations(texts)]
-            if missing:
-                self.translating = card["key"]
-                self.translator.submit(self.job_translate, card["key"], missing)
-                return
+            if self.translate_after.get(key, 0) > now:
+                continue
+            self.translating = key
+            self.translator.submit(self.job_translate, key, missing)
+            return
 
     def job_translate(self, key, texts):
         try:
@@ -718,13 +736,19 @@ class Pipeline:
                 self.slack_reply(key, head, "bounce", reasons="; ".join(g["ask"] for g in told))
             return
 
+        if (card["review_head"] != head or not card["review"]) and self.carry_over(card, snap):
+            card = self.store.get_pr(key)  # only main merged in: the review still stands
         if card["review_head"] != head or not card["review"]:
             used = self.store.count_events("review", time.time() - 86400)
             if used >= self.config["agent"]["daily_review_limit"]:
                 self.store.set_stage(key, "queued", f"daily agent-review budget used ({used}/24h), queued")
                 return
+            wait = self.agent_gate(card)
+            if wait:
+                self.store.set_stage(key, "queued", wait)
+                return
             self.store.set_stage(key, "queued", f"waiting for agent review ({result['tier']})")
-            self.submit(key, self.job_review, key, snap, result["tier"])
+            self.submit(key, self.job_review, key, snap, result["tier"], self.delta_base(card))
             return
 
         review = card["review"]
@@ -754,6 +778,11 @@ class Pipeline:
             if self.try_fix(card, snap, "findings", issues):
                 return
             published = self.findings_review(key, head)
+            if not published and confirmed and all(f.get("raised_before") for f in confirmed) \
+                    and self.latest_findings_review(key):  # nothing new since the last posted review
+                self.store.set_stage(key, "needs_author", "blocking issues confirmed, already posted, "
+                                     "waiting for the author")
+                return
             if not published and is_live(self.config) and self.policy["auto_publish_findings"]:
                 published = self.publish_findings(key, by="agent")
             self.store.set_stage(key, "needs_author", "blocking issues confirmed" + (", posted on the PR, waiting for the author" if published else ""))
@@ -781,6 +810,8 @@ class Pipeline:
     # ---- answering replies on the agent's review comments --------------------
     def answer_replies(self, card, snap):
         if not (is_live(self.config) and self.policy["auto_discuss"]):
+            return False
+        if self.agent_gate(card):  # outside the agent's window replies wait for it
             return False
         replies = self.open_replies(card)
         if not replies:
@@ -930,6 +961,10 @@ class Pipeline:
                                                             approved_head=head))
         return approved
 
+    def latest_findings_review(self, key):
+        done = [a for a in self.store.actions(key) if a["event"] == "review:findings" and a["phase"] == "done"]
+        return done[-1]["result"] if done else None
+
     def findings_review(self, key, head):
         done = [a for a in self.store.actions(key)
                 if a["head"] == head and a["event"] == "review:findings" and a["phase"] == "done"]
@@ -1024,7 +1059,10 @@ class Pipeline:
         assessment.update(triage=triage_record, targeted=targeted_status,
                           attempts={f: len(a) for f, a in sent.items() if a})
         self.store.update_pr(key, ci=assessment)
-        if assessment["needs_triage"]:
+        if assessment["needs_triage"]:  # new failures: the rules pass is free
+            self.submit(key, self.job_ci_triage, key, snap, assessment["failures"])
+        elif (triage_record or {}).get("pending") and assessment["status"] == "failed" \
+                and not self.agent_gate(card):  # the agent reads what the rules left
             self.submit(key, self.job_ci_triage, key, snap, assessment["failures"])
         if not merge_gate:
             return  # no approval yet: CI is run and shown, not judged
@@ -1213,6 +1251,10 @@ class Pipeline:
             when = "after the running fix" if running else time.strftime("%H:%M", time.localtime(next_slot))
             self.store.set_stage(key, "queued", f"agent will {self.FIX_TASKS[kind]}; next fix slot {when}")
             return True
+        wait = self.agent_gate(card)
+        if wait:
+            self.store.set_stage(key, "queued", f"agent will {self.FIX_TASKS[kind]}; {wait}")
+            return True
         self.store.set_stage(key, "reviewing", f"agent is trying to {self.FIX_TASKS[kind]}")
         self.submit(key, self.job_fix, key, snap, kind, list(issues))
         return True
@@ -1306,13 +1348,15 @@ class Pipeline:
         and then watched. Never parked on you."""
         key = card["key"]
         family_of = lambda f: "rerun-test" if f["name"].startswith(ci.TARGETED_PREFIX) else "rerun-failed"  # noqa: E731
-        todo, waiting, again, no_log_retry = set(), False, [], 0
+        todo, waiting, again, no_log_retry, waiting_agent = set(), False, [], 0, False
         for failure in failures:
             attempts = sent[family_of(failure)]
             finished = epoch(failure.get("completed_at") or "")
             failed_again = any(a["ts"] < finished for a in attempts)
             if len(attempts) >= self.RETRY_LIMIT or (failed_again and evidence_line(failure)):
                 again.append(failure)  # it already failed after a rerun
+            elif failed_again and failure.get("pending_agent"):
+                waiting_agent = True  # one rerun done; the agent reads the log in its next window
             elif failed_again:  # no log to go on: rerun again rather than ask the author
                 no_log_retry = max(no_log_retry, len(attempts))
                 if self.retry_due(attempts, now):
@@ -1331,7 +1375,10 @@ class Pipeline:
                 "/rerun-test " + " ".join(review.get("targeted_tests") or [])
             self.send_ci(card, head, family, command, "unattributed failure: one fresh run first", sent[family])
         readable = [f for f in again if evidence_line(f)]
-        if no_log_retry and (todo or waiting):
+        if waiting_agent and not (todo or waiting or readable):
+            self.store.set_stage(key, "approved", f"{len(failures)} CI failure(s) still failing after a rerun; "
+                                 + (self.agent_gate(card) or "the agent is reading the logs"))
+        elif no_log_retry and (todo or waiting):
             done = no_log_retry + (1 if todo else 0)
             self.store.set_stage(key, "approved", f"{len(failures)} CI failure(s) without a readable log, "
                                  f"agent rerunning ({done}/{self.RETRY_LIMIT})")
@@ -1418,6 +1465,78 @@ class Pipeline:
         return False
 
     # ---- jobs (worker threads) -------------------------------------------
+    # ---- agent budget: time windows and a daily token cap ------------------
+    AGENT_JOBS = ("job_review", "job_ci_triage", "job_fix", "job_discuss")
+
+    def record_usage(self, job, tokens):
+        self.store.add_usage(job, tokens)
+
+    def backfill_usage(self, runs_dir):
+        """First start with metering: count today's earlier codex runs from their logs."""
+        if self.store.has_usage() or not runs_dir.is_dir():
+            return
+        since = self.day_start()
+        for run in runs_dir.iterdir():
+            stderr = run / "stderr.txt"
+            if stderr.exists() and stderr.stat().st_mtime >= since:
+                job = run.name.rsplit("-", 2)[-2] if run.name.count("-") >= 2 else "agent"
+                self.store.add_usage(job, agent.tokens_used(stderr.read_text(errors="ignore")),
+                                     ts=stderr.stat().st_mtime)
+
+    @staticmethod
+    def day_start(now=None):
+        return datetime.fromtimestamp(now or time.time()).replace(hour=0, minute=0, second=0,
+                                                                  microsecond=0).timestamp()
+
+    def window_starts(self, now):
+        local = datetime.fromtimestamp(now)
+        starts = []
+        for day in (-1, 0, 1, 2):
+            base = (local + timedelta(days=day)).replace(second=0, microsecond=0)
+            for spec in self.config["agent"].get("windows") or []:
+                hour, minute = (int(part) for part in spec.split(":"))
+                starts.append(base.replace(hour=hour, minute=minute).timestamp())
+        return sorted(starts)
+
+    def window_state(self, now=None):
+        """(open, next start): agent jobs start only inside a window; no windows = always open."""
+        now = now or time.time()
+        if not self.config["agent"].get("windows"):
+            return True, now
+        span = 60 * self.config["agent"].get("window_minutes", 120)
+        starts = self.window_starts(now)
+        return any(start <= now < start + span for start in starts), next(s for s in starts if s > now)
+
+    def running_agent_jobs(self):
+        return sum(1 for job in self.inflight.values() if job in self.AGENT_JOBS) + bool(self.translating)
+
+    def agent_gate(self, card=None, window=True):
+        """'' when an agent job may start now, else why not. A card you just
+        asked about (rereview, add, restore) skips the window, never the budget."""
+        now, cfg = time.time(), self.config["agent"]
+        budget = cfg.get("daily_token_budget") or 0
+        if budget:
+            used = self.store.tokens_since(self.day_start(now))
+            if used + (self.running_agent_jobs() + 1) * cfg.get("token_reserve", 150000) > budget:
+                tomorrow = self.day_start(now) + 86400
+                starts = [s for s in self.window_starts(now) if s >= tomorrow] if cfg.get("windows") else [tomorrow]
+                return (f"today's agent token budget is used ({used / 1e6:.1f}M of {budget / 1e6:g}M); "
+                        f"next agent run {datetime.fromtimestamp(starts[0]).strftime('%m-%d %H:%M')}")
+        if window and not (card and card["decision"].get("run_now_until", 0) > now):
+            open_, next_start = self.window_state(now)
+            if not open_:
+                return f"waiting for the next agent window ({datetime.fromtimestamp(next_start).strftime('%H:%M')})"
+        return ""
+
+    def agent_status(self):
+        now = time.time()
+        open_, next_start = self.window_state(now)
+        return {"windows": self.config["agent"].get("windows") or [], "open": open_,
+                "next": next_start if self.config["agent"].get("windows") else 0,
+                "tokens_today": self.store.tokens_since(self.day_start(now)),
+                "budget": self.config["agent"].get("daily_token_budget") or 0,
+                "blocked": self.agent_gate(window=False)}
+
     def submit(self, key, fn, *args):
         with self.lock:
             if key in self.inflight:
@@ -1453,20 +1572,80 @@ class Pipeline:
         self.status["agent_blocked"] = {"reason": "every codex account is out of quota", "at": time.time()}
         return "every codex account is out of quota, retrying automatically"
 
-    def job_review(self, key, snap, tier):
+    def carry_over(self, card, snap):
+        """A new head whose PR diff is unchanged (only main merged in) keeps its
+        review: no agent run. The git check is free and cached per head."""
+        review, head = card["review"] or {}, snap["headRefOid"]
+        if not (review.get("diff_fp") and card["review_head"]) or card["decision"].get("full_review"):
+            return False
+        cached = card["decision"].get("head_fp") or ["", ""]
+        if cached[0] == head:
+            fp = cached[1]
+        else:
+            try:
+                fp = agent.Workspace(self.config, card["repo"], card["number"], head,
+                                     snap["baseRefName"]).diff_fingerprint()
+            except (agent.AgentError, AttributeError, OSError, subprocess.SubprocessError):
+                return False
+            self.store.update_pr(card["key"], decision=dict(card["decision"], head_fp=[head, fp]))
+        if fp != review["diff_fp"]:
+            return False
+        self.store.update_pr(card["key"], review=self.carried_review(card, head), review_head=head)
+        self.store.add_event(card["key"], "decision", f"review carried over to {head[:8]}: the PR's own diff is "
+                             f"unchanged since {card['review_head'][:8]}, only main was merged in")
+        return True
+
+    def carried_review(self, card, head, **extra):
+        """The review moved to a new head: findings already posted are not posted again."""
+        review, published = card["review"], self.findings_review_any(card["key"])
+        findings = [dict(f, raised_before=bool(f.get("raised_before") or published)) for f in review["findings"]]
+        return dict(review, findings=findings, head=head, **extra)
+
+    def delta_base(self, card):
+        """The reviewed head a follow-up review starts from; None means a full review."""
+        review = card["review"] or {}
+        if "findings" not in review or not card["review_head"] or card["decision"].get("full_review"):
+            return None
+        return card["review_head"]
+
+    def job_review(self, key, snap, tier, since=None):
         head = snap["headRefOid"]
-        self.store.set_stage(key, "reviewing", f"agent reviewing ({tier}, {self.config['agent']['runner']})")
+        self.store.set_stage(key, "reviewing", f"agent reviewing ({tier}, {self.config['agent']['runner']})"
+                             + (f", follow-up since {since[:8]}" if since else ""))
         card = self.store.get_pr(key)
         workspace = agent.Workspace(self.config, card["repo"], card["number"], head, snap["baseRefName"])
         skill_dir, skill_commit = (self.skills.ensure() if self.skills
                                    else (self.config["agent"]["review_skill_dir"], ""))
+        earlier = (card["review"] or {}).get("findings") or [] if since else []
+        published = self.findings_review_any(key)
         try:
             workspace.prepare(snap)
             ranges = new_side_ranges((workspace.ctx / "diff.patch").read_text())
-            result, review_info = agent.review(self.config, workspace, tier, skill_dir, skill_commit)
+            delta = workspace.prepare_delta(since) if since and hasattr(workspace, "prepare_delta") else None
+            if delta is not None and not delta.strip():  # nothing in the PR's files changed
+                review = self.carried_review(card, head, at=time.time(), diff_fp=getattr(workspace, "fingerprint", ""))
+                self.store.update_pr(key, review=review, review_head=head)
+                self.store.add_event(key, "decision", f"review carried over to {head[:8]}: no change in the PR's "
+                                     f"files since {since[:8]}")
+                return
+            if delta is not None:
+                previous = [{name: f.get(name) for name in ("title", "severity", "kind", "category", "path", "line",
+                                                            "scenario", "comment")} for f in earlier]
+                result, review_info = agent.review_delta(self.config, workspace, tier, skill_dir, since, previous)
+            else:
+                since = None
+                result, review_info = agent.review(self.config, workspace, tier, skill_dir, skill_commit)
             findings = [dict(f, anchored=anchored(f, ranges)) for f in result["findings"]]
-            verification, verify_info = agent.verify(self.config, workspace, findings)
-            kept, dropped = agent.apply_verification(findings, verification)
+            # Findings carried over from the earlier review keep their verification; only new ones are checked.
+            old = {f["title"]: f for f in earlier} if since else {}
+            carried = [dict(f, verify=old[f["title"]].get("verify", "unverified"),
+                            verify_reason=old[f["title"]].get("verify_reason", ""),
+                            raised_before=bool(old[f["title"]].get("raised_before") or published))
+                       for f in findings if f["title"] in old]
+            fresh = [f for f in findings if f["title"] not in old]
+            verification, verify_info = agent.verify(self.config, workspace, fresh)
+            kept, dropped = agent.apply_verification(fresh, verification)
+            kept = carried + kept
             # Asking again for evidence someone already asked for is noise, not review.
             repeats = [f for f in kept if f.get("raised_before") and not agent.is_risk(f)]
             kept = [f for f in kept if f not in repeats]
@@ -1477,39 +1656,71 @@ class Pipeline:
             workspace.cleanup()
         review = dict(result, findings=kept, dropped=dropped, verdict=verdict,
                       agent_verdict=result["verdict"], head=head, at=time.time(),
-                      skill_commit=skill_commit, runs=[review_info, verify_info])
+                      skill_commit=skill_commit, runs=[review_info, verify_info],
+                      diff_fp=getattr(workspace, "fingerprint", ""), delta_since=since or "")
+        if since:  # a follow-up keeps the full picture from the earlier review
+            earlier_review = card["review"] or {}
+            for name in ("mermaid", "corpus_synthesis"):
+                review[name] = review.get(name) or earlier_review.get(name, "")
+            review["summary"] = (earlier_review.get("summary", "") + f"\nSince {since[:8]}:\n"
+                                 + result.get("summary", "")).strip()
         self.store.update_pr(key, review=review, review_head=head)
+        decision = self.store.get_pr(key)["decision"]
+        if decision.get("full_review"):
+            self.store.update_pr(key, decision=dict(decision, full_review=False))
         self.store.add_event(key, "review",
-                             f"agent review done: {verdict}, {len(kept)} finding(s) kept, {len(dropped)} rejected by the verifier"
-                             + (f", skill {skill_commit[:8]}" if skill_commit else ""),
+                             (f"agent follow-up review since {since[:8]} done: " if since else "agent review done: ")
+                             + f"{verdict}, {len(kept)} finding(s) kept, {len(dropped)} rejected by the verifier"
+                             + (f", skill {skill_commit[:8]}" if skill_commit and not since else ""),
                              {"seconds": review_info.get("seconds")})
 
     def job_ci_triage(self, key, snap, failures):
+        """Rules first, free; the agent reads only what they leave, and only when
+        the agent gate is open. What it could not read yet waits as `pending`."""
         head = snap["headRefOid"]
         card = self.store.get_pr(key)
-        workspace = agent.Workspace(self.config, card["repo"], card["number"], head, snap["baseRefName"])
-        try:
-            workspace.prepare(snap)
-            # Every failing leg gets its log, at most 20: one leg per job first,
-            # then the other legs. Downloaded in parallel because large logs are slow.
-            first = {}
-            for failure in failures:
-                workflow, _, job = failure["name"].rpartition(" / ")
-                first.setdefault(f"{workflow} / {job.split(' (')[0]}", failure["name"])
-            order = list(first.values()) + [f["name"] for f in failures if f["name"] not in first.values()]
-            wanted = [f for f in failures if f["name"] in set(order[:20])]
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                logs = dict(zip([f["name"] for f in wanted],
-                                pool.map(lambda f: github.failed_job_log(f["url"], 150), wanted)))
-            with_logs = [dict(f, log_tail=logs.get(f["name"], NO_LOG)) for f in failures]
-            result, info = agent.triage_ci(self.config, workspace, with_logs,
-                                           (card["review"] or {}).get("related_tests") or [])
-        finally:
-            workspace.cleanup()
+        # Every failing leg gets its log, at most 20: one leg per job first,
+        # then the other legs. Downloaded in parallel because large logs are slow.
+        first = {}
+        for failure in failures:
+            workflow, _, job = failure["name"].rpartition(" / ")
+            first.setdefault(f"{workflow} / {job.split(' (')[0]}", failure["name"])
+        order = list(first.values()) + [f["name"] for f in failures if f["name"] not in first.values()]
+        wanted = [f for f in failures if f["name"] in set(order[:20])]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            logs = dict(zip([f["name"] for f in wanted],
+                            pool.map(lambda f: github.failed_job_log(f["url"], 150), wanted)))
+            steps = dict(zip([f["name"] for f in wanted],
+                             pool.map(lambda f: github.failed_step(f.get("url", "")), wanted)))
+        with_logs = [dict(f, log_tail=logs.get(f["name"], NO_LOG), failed_step=steps.get(f["name"]))
+                     for f in failures]
+        ruled = ci.rule_triage(with_logs)
+        rest = [f for f in with_logs if f["name"] not in {r["name"] for r in ruled}]
+        result, info, pending = {"failures": list(ruled), "summary": ""}, {}, []
+        if rest and not self.agent_gate(card):
+            workspace = agent.Workspace(self.config, card["repo"], card["number"], head, snap["baseRefName"])
+            try:
+                workspace.prepare(snap)
+                read, info = agent.triage_ci(self.config, workspace, [
+                    {k: v for k, v in f.items() if k != "failed_step"} for f in rest],
+                    (card["review"] or {}).get("related_tests") or [])
+            finally:
+                workspace.cleanup()
+            result["failures"] += read.get("failures", [])
+            result["summary"] = read.get("summary", "")
+        elif rest:
+            pending = [f["name"] for f in rest]
+        if ruled and not result["summary"]:
+            kinds = sorted({r["classification"] for r in ruled})
+            result["summary"] = (f"{len(ruled)} failure(s) classified by rules ({', '.join(kinds)})"
+                                 + (f"; {len(pending)} left for the agent's next window" if pending else ""))
+        elif pending:
+            result["summary"] = f"{len(pending)} failure(s) left for the agent's next window"
         card = self.store.get_pr(key)
         # Jobs whose log could not be read: nothing in them may be quoted to the author.
         no_log = sorted(f["name"] for f in with_logs if github.log_missing(f["log_tail"]))
-        record = dict(result, signature=ci.signature(failures), head=head, at=time.time(), no_log=no_log)
+        record = dict(result, signature=ci.signature(failures), head=head, at=time.time(), no_log=no_log,
+                      pending=pending)
         self.store.update_pr(key, ci=dict(card["ci"] or {}, triage=record))
         self.store.add_event(key, "ci", f"CI triage: {result['summary']}", {"seconds": info.get("seconds")})
 

@@ -129,6 +129,22 @@ def log_missing(text):
     return bool(LOG_MISSING.search(text or "")) and len((text or "").strip().splitlines()) <= 2
 
 
+def failed_step(url):
+    """The step that failed in an Actions job: its name, "" when no step failed
+    (the runner went away), None when it cannot be read."""
+    match = JOB_URL.search(url or "")
+    if not match:
+        return None
+    try:
+        job = gh_json(["api", f"repos/{match.group(1)}/actions/jobs/{match.group(3)}"])
+    except GitHubError:
+        return None
+    for step in job.get("steps") or []:
+        if step.get("conclusion") in ("failure", "timed_out", "cancelled"):
+            return step.get("name") or ""
+    return ""
+
+
 def failed_job_log(url, max_lines=250):
     """Tail of a failed Actions job log, or a short note saying why there is none."""
     match = JOB_URL.search(url or "")

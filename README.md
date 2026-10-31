@@ -168,6 +168,8 @@ Everything has a default in [`inbox/config.py`](inbox/config.py); `config.json` 
 | `agent.profiles` | Model and reasoning effort per job. |
 | `agent.service_tier` | Passed to codex as `service_tier` (e.g. `priority` for faster, more expensive runs). |
 | `agent.max_concurrent`, `agent.daily_review_limit` | Parallel agent jobs and reviews per 24 h. |
+| `agent.windows`, `agent.window_minutes` | Local times when agent (codex) work may start, e.g. `["10:00", "15:00", "21:00"]`, each window `window_minutes` long; `[]` = any time. Polling, CI commands, merges and Slack replies run all the time. A card you act on (re-review, add, restore) skips the window for an hour. |
+| `agent.daily_token_budget`, `agent.token_reserve` | Hard cap on codex tokens per local day (`0` = none), read from each run's `tokens used`; every running job holds `token_reserve` until its real count is in. |
 | `agent.review_skill` | Git repo, branch and folder of the review skill, synced every 10 minutes. A review that skips the skill is rejected. |
 | `policy.auto_*` | One switch per kind of autonomous write: CI commands, posting findings, author notes, answering replies, approving, merging, pushing fixes. |
 | `policy.max_*_per_day`, `max_agent_fixes_per_pr` | Caps. The merge cap counts only the agent's own merges; running fixes count against the fix cap. |
@@ -176,6 +178,16 @@ Everything has a default in [`inbox/config.py`](inbox/config.py); `config.json` 
 | `policy.github_prefix` | Starts every review, comment and reply the agent posts on GitHub (CI slash commands stay bare). Inline comments carry no `[P1]`/`[P2]` tags: a must-fix bug is plain, smaller points start with `Minor:`, `nit:` or `Non-blocking:`. |
 | `refresh_seconds` | How often active PRs and PRs waiting on the author are re-checked. |
 | `server.host`, `server.port` | Defaults `127.0.0.1:8765`. Keep it on localhost. |
+
+## Keeping codex usage down
+
+Most tokens go to reviews. What keeps them down:
+
+- **Windows and a daily cap.** Agent work runs in batches inside `agent.windows` and stops at `agent.daily_token_budget`. The page header shows today's usage and the next window.
+- **Follow-up reviews.** A new head on a reviewed PR is not reviewed from scratch. If the PR's own diff is unchanged (only main merged in), the review carries over with no agent run. Otherwise the agent reads only the change since the reviewed head and re-checks the earlier findings, without the corpus sweep. "Re-review" on the page asks for a full one.
+- **CI rules first.** Status-aggregation jobs, setup-step failures and known CI-infrastructure errors are classified without the agent; failures without a readable log are rerun, never read by the agent. The agent reads only what is left, in a window.
+- **Chinese on demand.** Agent text is translated only when you open a card in the Chinese view.
+- **Lighter profiles.** `agent.profiles` can set a lower `effort` for small PRs (`T1`) and the verifier.
 
 ## Using it outside SGLang
 

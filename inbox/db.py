@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS actions (
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS translations (src TEXT PRIMARY KEY, zh TEXT NOT NULL, ts REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS usage (ts REAL NOT NULL, job TEXT NOT NULL, tokens INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS usage_ts ON usage(ts);
 """
 
 JSON_COLUMNS = ("labels", "meta", "triage", "review", "ci", "decision", "requesters")
@@ -246,6 +248,22 @@ class Store:
                 "SELECT COUNT(*) FROM events WHERE kind=? AND ts>=? AND substr(message, 1, ?)=?",
                 (kind, since, len(prefix), prefix)).fetchone()
         return row[0]
+
+    # ---- agent token usage ---------------------------------------------
+    def add_usage(self, job, tokens, ts=None):
+        with self.lock:
+            self.conn.execute("INSERT INTO usage (ts, job, tokens) VALUES (?, ?, ?)",
+                              (ts or time.time(), job, int(tokens)))
+            self.conn.commit()
+
+    def tokens_since(self, since):
+        with self.lock:
+            row = self.conn.execute("SELECT COALESCE(SUM(tokens), 0) FROM usage WHERE ts>=?", (since,)).fetchone()
+        return row[0]
+
+    def has_usage(self):
+        with self.lock:
+            return self.conn.execute("SELECT 1 FROM usage LIMIT 1").fetchone() is not None
 
     def last_event_ts(self, kind, prefix=""):
         """When the latest `kind` event whose message starts with `prefix` happened, or 0."""

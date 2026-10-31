@@ -105,6 +105,19 @@ def _git(repo_dir, *args, timeout=600):
     return proc.stdout
 
 
+# A follow-up review reads only what changed since the reviewed head; past
+# this many changed lines it is a rewrite and gets a full review.
+DELTA_MAX_LINES = 1500
+
+
+def fingerprint(diff_text):
+    """What a PR changes, independent of where main is: blob ids and hunk
+    offsets dropped, so merging main alone leaves it the same."""
+    kept = ["@@" if line.startswith("@@") else line for line in diff_text.splitlines()
+            if not line.startswith(("index ", "similarity index", "dissimilarity index"))]
+    return hashlib.sha1("\n".join(kept).encode()).hexdigest()
+
+
 class Workspace:
     """A detached worktree of one PR head plus its context bundle."""
 
@@ -116,7 +129,7 @@ class Workspace:
         self.worktree = self.data / "worktrees" / f"{repo.replace('/', '__')}-{number}-{head[:12]}"
         self.ctx = self.worktree.parent / (self.worktree.name + ".ctx")
 
-    def prepare(self, pr_snapshot):
+    def _fetch(self):
         if not (self.mirror / ".git").exists():
             shutil.rmtree(self.mirror, ignore_errors=True)
             self.mirror.parent.mkdir(parents=True, exist_ok=True)
@@ -129,6 +142,37 @@ class Workspace:
         _git(self.mirror, "fetch", "--quiet", "origin", self.base_ref,
              f"+refs/pull/{self.number}/head:refs/review-inbox/pr-{self.number}", timeout=1800)
         _git(self.mirror, "cat-file", "-e", f"{self.head}^{{commit}}")
+
+    def diff_fingerprint(self):
+        """Fingerprint of the PR's own change at this head, without a checkout."""
+        self._fetch()
+        merge_base = _git(self.mirror, "merge-base", f"origin/{self.base_ref}", self.head).strip()
+        return fingerprint(_git(self.mirror, "diff", "--no-color", f"{merge_base}..{self.head}"))
+
+    def prepare_delta(self, since):
+        """Write what changed since an earlier reviewed head to delta.patch,
+        limited to the files the PR touches. None when that head is gone
+        (force-pushed away) or the delta is too big to call a follow-up."""
+        try:
+            _git(self.mirror, "cat-file", "-e", f"{since}^{{commit}}")
+        except AgentError:
+            try:
+                _git(self.mirror, "fetch", "--quiet", "origin", since, timeout=600)
+            except AgentError:
+                return None
+        files = _git(self.mirror, "diff", "--name-only", f"{self.merge_base}..{self.head}").split()
+        if not files:
+            return None
+        delta = _git(self.mirror, "diff", "--no-color", f"{since}..{self.head}", "--", *files)
+        changed = sum(1 for line in delta.splitlines()
+                      if line[:1] in "+-" and not line.startswith(("+++", "---")))
+        if changed > DELTA_MAX_LINES:
+            return None
+        (self.ctx / "delta.patch").write_text(delta)
+        return delta
+
+    def prepare(self, pr_snapshot):
+        self._fetch()
         if self.worktree.exists() and not self._worktree_intact():
             self.cleanup()  # an interrupted checkout would hand the agent missing files
         if not self.worktree.exists():
@@ -140,6 +184,7 @@ class Workspace:
         self.ctx.mkdir(parents=True, exist_ok=True)
         diff = _git(self.mirror, "diff", "--no-color", f"{merge_base}..{self.head}")
         (self.ctx / "diff.patch").write_text(diff)
+        self.fingerprint = fingerprint(diff)
         (self.ctx / "pr.json").write_text(json.dumps(
             _pr_context(self.repo, self.number, pr_snapshot, merge_base), ensure_ascii=False, indent=1))
         return merge_base
@@ -191,6 +236,14 @@ ACCOUNT_REST = 30 * 60
 _resting = {}
 _resting_lock = threading.Lock()
 _emails = {}
+# Every codex run reports its token count here (the pipeline meters the daily budget).
+TOKENS_USED = re.compile(r"tokens used\s*\n\s*([\d,]+)")
+usage_hook = None
+
+
+def tokens_used(stderr):
+    found = TOKENS_USED.findall(stderr or "")
+    return int(found[-1].replace(",", "")) if found else 0
 
 
 def codex_homes(config):
@@ -223,6 +276,8 @@ def run_codex(config, cmd, prompt, cwd, label):
                                   timeout=config["agent"]["timeout_seconds"], env=env)
         except subprocess.TimeoutExpired as exc:
             raise AgentError(f"{label}: timed out after {config['agent']['timeout_seconds']}s") from exc
+        if usage_hook:
+            usage_hook(label, tokens_used(proc.stderr))
         if proc.returncode != 0 and LIMIT_HIT.search(proc.stderr or ""):
             with _resting_lock:
                 _resting[home] = time.time() + ACCOUNT_REST
@@ -339,6 +394,19 @@ def review(config, workspace, tier, skill_dir, skill_commit=""):
         missing = missing_skill_steps((Path(info["run_dir"]) / "stderr.txt").read_text(), skill_dir)
         if missing:
             raise AgentError("review did not follow the sglang-humanize-review skill: " + ", ".join(missing))
+    return result, info
+
+
+def review_delta(config, workspace, tier, skill_dir, since, previous):
+    """Follow-up review of a new head: only the change since `since`, plus
+    whether the previous findings still hold. No corpus sweep."""
+    prompt = render("review_delta.md", repo=workspace.repo, number=workspace.number, head=workspace.head,
+                    since=since, login=config["github_login"], worktree=workspace.worktree,
+                    ctx_dir=workspace.ctx, skill_dir=skill_dir, tier=tier,
+                    previous=json.dumps(previous, ensure_ascii=False, indent=1))
+    result, info = run_agent(config, prompt, REVIEW_SCHEMA, workspace, "delta", profile_for(config, tier),
+                             skill_dir=skill_dir)
+    info["delta_since"] = since
     return result, info
 
 

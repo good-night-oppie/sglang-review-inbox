@@ -42,11 +42,19 @@
     ],
     "max_concurrent": 4,
     "daily_review_limit": 100,
+    "windows": [
+      "10:00",
+      "15:00",
+      "21:00"
+    ],
+    "window_minutes": 120,
+    "daily_token_budget": 8000000,
+    "token_reserve": 150000,
     "service_tier": "",
     "profiles": {
       "T1": {
         "model": "<CODEX_MODEL>",
-        "effort": "high"
+        "effort": "medium"
       },
       "T2": {
         "model": "<CODEX_MODEL>",
@@ -58,7 +66,7 @@
       },
       "verify": {
         "model": "<CODEX_MODEL>",
-        "effort": "high"
+        "effort": "medium"
       },
       "ci": {
         "model": "<CODEX_MODEL>",

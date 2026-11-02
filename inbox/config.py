@@ -14,6 +14,8 @@ DEFAULTS = {
     "github_login": "",
     # Only PRs in these repos are ever reviewed or touched.
     "repos": ["sgl-project/sglang"],
+    # Review PRs opened by github_login itself (a team sharing one account).
+    "review_own_prs": False,
     "data_dir": "~/.cache/review-inbox",
     # shadow: agents review and track, but nothing is written to GitHub/Slack
     # unless you click a button. live: the autonomous writes allowed by

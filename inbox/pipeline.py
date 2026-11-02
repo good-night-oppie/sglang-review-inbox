@@ -664,7 +664,8 @@ class Pipeline:
         added = 0
         for repo in self.repos:
             items = github.search_issues(
-                f"repo:{repo} is:pr is:open {qualifier}:{self.login} updated:>={since} -author:{self.login}")
+                f"repo:{repo} is:pr is:open {qualifier}:{self.login} updated:>={since}"
+                + ("" if self.config.get("review_own_prs") else f" -author:{self.login}"))
             for item in items:
                 card, created = self.store.ensure_pr(repo, item["number"], requester={
                     "id": f"{source}:{repo}#{item['number']}", "source": source,
@@ -712,7 +713,9 @@ class Pipeline:
             if snap["state"] == "MERGED" and merged_by == self.login:  # yours, by hand or by the agent
                 self.slack_reply(key, head, "merged")
             return
-        if card["author"] == self.login:
+        # jj-agent overlay: every teammate opens PRs from the one shared account the
+        # Inbox runs as, so `review_own_prs` keeps them instead of dismissing them.
+        if card["author"] == self.login and not self.config.get("review_own_prs"):
             self.store.set_stage(key, "dismissed", "your own PR")
             return
 

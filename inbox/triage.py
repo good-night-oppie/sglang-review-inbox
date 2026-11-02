@@ -1,38 +1,48 @@
-"""Cheap, deterministic triage that runs before any agent time is spent:
-risk areas from paths, AI-authorship signals, readiness gates and a tier."""
+"""Cheap, deterministic triage for jj-agent PRs, run before any agent time is
+spent: risk areas from paths, AI-authorship signals, readiness gates and a
+tier. This file replaces the SGLang version of sglang-review-inbox
+(inbox/triage.py); the function signatures are unchanged so inbox/pipeline.py
+and server.py work as before."""
 
 import re
 
 # Ordered most specific first; the first matching prefix wins.
+# "high" = the maintainers' red-line surfaces (local server, path handling,
+# ffmpeg argv, overwrite protection, network, packaging); see
+# .claude/skills/jj-agent-review/references/maintainer-standards.md §1.
 RISK_PATHS = [
-    ("high", "scheduler/manager", "python/sglang/srt/managers/"),
-    ("high", "KV/mem cache", "python/sglang/srt/mem_cache/"),
-    ("high", "model executor / CUDA graph", "python/sglang/srt/model_executor/"),
-    ("high", "attention backend", "python/sglang/srt/layers/attention/"),
-    ("high", "MoE", "python/sglang/srt/layers/moe/"),
-    ("high", "quantization", "python/sglang/srt/layers/quantization/"),
-    ("high", "distributed", "python/sglang/srt/distributed/"),
-    ("high", "speculative", "python/sglang/srt/speculative/"),
-    ("high", "server args / defaults", "python/sglang/srt/server_args.py"),
-    ("high", "server args / defaults", "python/sglang/srt/arg_groups/"),
-    ("high", "API entrypoints", "python/sglang/srt/entrypoints/"),
-    ("high", "PD disaggregation", "python/sglang/srt/disaggregation/"),
-    ("high", "sampling", "python/sglang/srt/sampling/"),
-    ("high", "kernels", "python/sglang/kernels/"),
-    ("high", "kernels", "python/sglang/jit_kernel/"),
-    ("high", "kernels", "sgl-kernel/"),
-    ("medium", "model implementation", "python/sglang/srt/models/"),
-    ("medium", "diffusion", "python/sglang/multimodal_gen/"),
-    ("medium", "layers", "python/sglang/srt/layers/"),
-    ("medium", "runtime other", "python/sglang/srt/"),
-    ("low", "tests", "test/"),
-    ("low", "docs", "docs/"),
-    ("low", "benchmark", "benchmark/"),
-    ("low", "CI", ".github/"),
-    ("low", "scripts", "scripts/"),
-    ("low", "examples", "examples/"),
+    ("high", "clean-room material", "reference/capcut-investigation/"),
+    ("high", "clip engine / export", "scripts/clip.py"),
+    ("high", "project / export", "scripts/project.py"),
+    ("high", "local server", "scripts/app_server.py"),
+    ("high", "launcher", "scripts/run_app.py"),
+    ("high", "packaging", "scripts/build_package.py"),
+    ("high", "packaging", "scripts/package_check.py"),
+    ("high", "network (AI naming)", "scripts/ai_editor.py"),
+    ("high", "network (recorder)", "scripts/recorder.py"),
+    ("high", "page logic (save / send / keys)", "app/app.js"),
+    ("medium", "speech / cleanup", "scripts/asr_engine.py"),
+    ("medium", "speech / cleanup", "scripts/cleanup.py"),
+    ("medium", "streamer-facing text", "scripts/friendly.py"),
+    ("medium", "page", "app/"),
+    ("medium", "scripts other", "scripts/"),
+    ("medium", "licences", "LICENSES.md"),
+    ("medium", "licences", "licenses/"),
+    ("medium", "licences", "第三方组件许可.txt"),
+    ("medium", "CI", ".github/"),
+    ("medium", "launcher", "切片助手.bat"),
+    ("medium", "launcher", "启动切片助手.vbs"),
+    ("low", "tests", "tests/"),
+    ("low", "docs", "reference/"),
+    ("low", "experiments", "experiments/"),
 ]
 RANK = {"low": 0, "medium": 1, "high": 2}
+
+# Files whose change means the export path moved: the PR must carry the
+# synthetic flash + beep A/V sync readings (<= 40 ms per seam).
+EXPORT_PATHS = ("scripts/clip.py", "scripts/project.py")
+SYNC_EVIDENCE = re.compile(r"音画|同步|a/v|av sync|sync|\b\d+(\.\d+)?\s*ms\b|毫秒", re.I)
+CLEANROOM = re.compile(r"capcut-investigation", re.I)
 
 AI_MARKERS = [
     (re.compile(r"generated with \[?claude code", re.I), "Claude Code"),
@@ -42,10 +52,9 @@ AI_MARKERS = [
     (re.compile(r"🤖"), "🤖 marker"),
 ]
 TEST_EVIDENCE = re.compile(
-    r"pytest|unittest|python3? -m|test_\w+\.py|gsm8k|mmlu|accuracy|bench_\w+|benchmark|"
-    r"/rerun-test|passed|tok/s|throughput|```", re.I)
-PERF_TITLE = re.compile(r"\[perf\]|speed ?up|optimi[sz]|faster|latency|throughput", re.I)
-PERF_NUMBERS = re.compile(r"\d[\d.,]*\s*(ms|us|µs|s\b|tok/s|tokens/s|x\b|×|%|qps|req/s|gb/s|tflops)", re.I)
+    r"unittest|Ran \d+ tests?|OK \(|OK\b|ruff|test_\w+\.py|python3? -[BI]|没跑|passed|```", re.I)
+PERF_TITLE = re.compile(r"\[perf\]|speed ?up|optimi[sz]|faster|latency|throughput|提速|更快", re.I)
+PERF_NUMBERS = re.compile(r"\d[\d.,]*\s*(ms|s\b|秒|x\b|×|%|倍)", re.I)
 
 
 def classify_path(path):
@@ -71,6 +80,7 @@ def triage(pr, policy, requested_by_human=False):
     files = pr.get("files") or []
     lines = (pr.get("additions") or 0) + (pr.get("deletions") or 0)
     areas, level = {}, "low"
+    paths = [item.get("path", "") for item in files]
     for item in files:
         file_level, area = classify_path(item.get("path", ""))
         churn = (item.get("additions") or 0) + (item.get("deletions") or 0)
@@ -79,7 +89,8 @@ def triage(pr, policy, requested_by_human=False):
             level = file_level
     body = pr.get("body") or ""
     title = pr.get("title") or ""
-    touches_tests = any(item.get("path", "").startswith("test/") for item in files)
+    touches_tests = any(path.startswith("tests/") for path in paths)
+    touches_export = any(path in EXPORT_PATHS for path in paths)
 
     # (id, kind, reason shown on the dashboard, what to ask the author; "" = don't ask)
     gates = []
@@ -88,25 +99,29 @@ def triage(pr, policy, requested_by_human=False):
     if pr.get("isDraft"):
         gates.append(("draft", "author", "still a draft", ""))  # the author's own choice; never nag
     if pr.get("mergeable") == "CONFLICTING":
-        # A merge concern, not a review one: the code is still reviewed and approved.
         gates.append(("conflict", "merge", "merge conflict with main",
                       "rebase onto main and resolve the merge conflicts"))
     if lines > policy["max_changed_lines"]:
         gates.append(("size", "author", f"{lines} changed lines, over the {policy['max_changed_lines']} limit",
                       f"split it below {policy['max_changed_lines']} changed lines (now {lines})"))
+    if any(path.startswith("reference/capcut-investigation/") for path in paths) or CLEANROOM.search(body):
+        # Clean-room rule (ADR-003): never a question for the author, always for a maintainer.
+        gates.append(("cleanroom", "human", "touches or cites reference/capcut-investigation/ (clean-room rule)", ""))
     if policy["require_test_plan"] and level != "low" and not touches_tests and not TEST_EVIDENCE.search(body):
         gates.append(("tests", "author", "no test commands or results in the description",
-                      "add the test commands and results for the current head to the description"))
+                      "add the unittest / ruff commands and their numbers for the current head to the description"))
+    if touches_export and not SYNC_EVIDENCE.search(body):
+        gates.append(("avsync", "author", "export code changed but no A/V sync readings in the description",
+                      "run the synthetic flash + beep sync check and add the per-seam readings (<= 40 ms) for FLV and MP4"))
     if policy["require_perf_numbers"] and PERF_TITLE.search(title) and not PERF_NUMBERS.search(body):
         gates.append(("perf", "author", "perf PR without before/after numbers",
-                      "add before/after numbers with hardware and workload"))
+                      "add before/after numbers with the machine and the recording used"))
 
     hot = level == "high"
-    model_lines = areas.get("model implementation", 0)
-    if hot and (lines > 400 or "server args / defaults" in areas or "API entrypoints" in areas):
+    if hot and (lines > 400 or "local server" in areas or "packaging" in areas or "clean-room material" in areas):
         tier = "T3"
-    elif model_lines > 1500 or areas.get("kernels", 0) > 300:
-        tier = "T3"
+    elif "network (AI naming)" in areas or "network (recorder)" in areas:
+        tier = "T3"  # the only places network is allowed: always a maintainer's eyes
     elif level == "low" or (lines < 80 and not hot):
         tier = "T1"
     else:

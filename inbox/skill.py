@@ -1,5 +1,10 @@
-"""Keep the review skill (sglang-humanize-review) at the latest commit of its
-GitHub branch, and check that an agent run actually used it."""
+"""Keep the review skill at the latest commit of its git branch (or use a
+local directory), and check that an agent run actually used it.
+
+Overlay for jj-agent: identical to upstream sglang-review-inbox except that
+the corpus-sweep steps are required only when the skill ships the sweep
+script / supplementary corpus. jj-agent-review has no review corpus, so a run
+must read SKILL.md and references/maintainer-standards.md, nothing more."""
 
 import re
 import subprocess
@@ -9,6 +14,7 @@ from pathlib import Path
 
 # Reference files that, when the skill ships them, every review must read.
 REQUIRED_REFERENCES = ("references/maintainer-standards.md",)
+SWEEP_SCRIPT = "scripts/summarize_sglang_review_corpus.py"
 SUPPLEMENT_CORPUS = "references/bbuf-recent-review-corpus.jsonl.gz"
 EXEC_LINE = re.compile(r"^/bin/(?:zsh|bash|sh) -lc (.+)$", re.M)
 
@@ -45,7 +51,6 @@ class SkillSync:
                     self._sync()
                     self.synced_at = time.time()
                 except (SkillSyncError, subprocess.TimeoutExpired) as exc:
-                    # Fall back to the last good checkout only while it is fresh enough.
                     if not self.commit or time.time() - self.synced_at > self.max_stale:
                         raise SkillSyncError(f"cannot sync the review skill: {exc}") from exc
             skill_dir = self.clone / self.subdir
@@ -58,7 +63,7 @@ class SkillSync:
             self.clone.parent.mkdir(parents=True, exist_ok=True)
             cmd = ["git", "clone", "--branch", self.branch]
             if self.seed and (self.seed / ".git").exists():
-                cmd += ["--reference-if-able", str(self.seed), "--dissociate"]  # reuse local objects
+                cmd += ["--reference-if-able", str(self.seed), "--dissociate"]
             proc = subprocess.run([*cmd, self.url, str(self.clone)], capture_output=True, text=True, timeout=1800)
             if proc.returncode != 0:
                 raise SkillSyncError(f"git clone: {proc.stderr.strip()[-300:]}")
@@ -71,11 +76,16 @@ def missing_skill_steps(transcript, skill_dir):
     """Steps of the skill a review run skipped, judged from the commands the
     agent executed (codex logs each as `/bin/zsh -lc ...`)."""
     commands = "\n".join(EXEC_LINE.findall(transcript))
-    skill_dir = str(skill_dir)
+    # Windows: codex prints no `/bin/zsh -lc` lines and uses backslash paths; judge from the whole
+    # transcript with separators normalised, so a review that did read the skill is not rejected.
+    if not commands.strip():
+        commands = transcript
+    commands = commands.replace("\\\\", "/").replace("\\", "/")
+    skill_dir = str(skill_dir).replace("\\", "/")
     missing = []
     if f"{skill_dir}/SKILL.md" not in commands:
         missing.append("read SKILL.md")
-    if "summarize_sglang_review_corpus.py" not in commands:
+    if (Path(skill_dir) / SWEEP_SCRIPT).exists() and SWEEP_SCRIPT.split("/")[-1] not in commands:
         missing.append("run the corpus sweep")
     for ref in REQUIRED_REFERENCES:
         if (Path(skill_dir) / ref).exists() and ref.split("/")[-1] not in commands:

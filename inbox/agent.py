@@ -337,6 +337,13 @@ def run_agent(config, prompt, schema, workspace, label, profile=None, skill_dir=
         if profile.get("model"):
             cmd += ["--model", profile["model"]]
 
+    # Windows: npm installs codex/claude as .cmd shims; CreateProcess will not resolve the bare name.
+    cmd[0] = shutil.which(cmd[0]) or cmd[0]
+    if os.name == "nt" and agent["runner"] == "codex":
+        # Windows: codex's read-only sandbox only reads under the working directory (--add-dir is not
+        # honoured for reads), so run from data_dir, which holds runs/, worktrees/ and the skill copy.
+        root = str(Path(config["data_dir"]).expanduser())
+        i = cmd.index("-C"); cmd[i + 1] = root
     started = time.time()
     account = ""
     if agent["runner"] == "codex":

@@ -1,17 +1,17 @@
-"""CI policy for SGLang PRs, encoding the maintainer's merge bar:
+"""CI policy for jj-agent PRs. Replaces the SGLang version of
+sglang-review-inbox (inbox/ci.py); same public names so pipeline.py works.
 
-- evidence must come from the current head; old-head passes do not count;
-- skipped / cancelled / zero-test jobs are not passes;
-- only lanes that matter for the change are required: an NVIDIA-only change
-  does not wait on AMD / NPU / XPU / ... lanes, and their failures are noted,
-  not blocking;
-- infra / flaky failures are retried a bounded number of times; what still
-  fails afterwards and is unrelated to the diff is noted, not blocking;
-- mergeable = related tests passed on this head, every other failure shown
-  to be unrelated, no conflict, and an approval.
+jj-agent's CI (.github/workflows/tests.yml) is one workflow, `tests`, with a
+two-leg matrix:
 
-Pure functions: they return a CI assessment and the commands that would
-advance it. The pipeline decides when to execute them and how often."""
+- `tests / linux (ubuntu-24.04)`  FFmpeg 6.1: the REQUIRED gate (ADR-003 D2);
+- `tests / linux (ubuntu-latest)` FFmpeg 8: continue-on-error, reported only.
+
+There are no run-ci labels, no gate jobs and no slash commands (/rerun-test,
+/tag-and-rerun-ci do not exist here), so this module never suggests a CI
+command: `suggestions` is always empty and reruns are a maintainer's
+`gh run rerun --failed`. Evidence must still come from the current head;
+skipped / cancelled / zero-test jobs are not passes."""
 
 import hashlib
 import re
@@ -19,29 +19,21 @@ import re
 from . import github
 from .github import summarize_checks
 
+# Kept for pipeline.py, which checks `RUN_CI_LABEL not in labels` before it
+# would send /tag-and-rerun-ci. jj-agent has no such label; with the policy
+# switches off in config.json the command is never sent, and the label name
+# below never matches a real label.
 RUN_CI_LABEL = "run-ci"
-# The gate of the base NVIDIA lane. Other lanes (Extra, Extra AMD, MLU, ...) need
-# their own opt-in label, so their gate failing only means "not requested".
-BASE_GATE = re.compile(r"^PR Test Base /")
+BASE_GATE = re.compile(r"^tests / linux \(ubuntu-24\.04\)$")
 TARGETED_PREFIX = "targeted / "
 
-# Workflow-name marker of a hardware lane -> platform, and what in a PR's title or
-# changed paths makes that platform relevant to it.
-PLATFORM_LANES = {
-    "(AMD)": "amd", "(NPU)": "npu", "(XPU)": "xpu", "(MUSA)": "musa", "(MLU)": "mlu",
-    "(Arm64)": "cpu", "(Xeon)": "cpu", "(MLX)": "mlx", "(PPU)": "ppu", "(sgl-router)": "router",
-}
-PLATFORM_HINTS = {
-    "amd": re.compile(r"\[amd\]|rocm|\bhip\b|_hip|hip_|aiter|gfx9\d+|mi3\d\d|\bamd\b|_amd|amd_", re.I),
-    "npu": re.compile(r"\[npu\]|npu|ascend", re.I),
-    "xpu": re.compile(r"\[xpu\]|xpu", re.I),
-    "musa": re.compile(r"musa", re.I),
-    "mlu": re.compile(r"\bmlu|cambricon", re.I),
-    "cpu": re.compile(r"\[cpu\]|/cpu/|_cpu\.py|arm64|aarch64|xeon|\bamx\b", re.I),
-    "mlx": re.compile(r"\bmlx|/metal/", re.I),
-    "ppu": re.compile(r"\bppu", re.I),
-    "router": re.compile(r"sgl-router|sgl_router|/router/", re.I),
-}
+REQUIRED_JOB = re.compile(r"linux \(ubuntu-24\.04\)")
+OPTIONAL_JOB = re.compile(r"linux \(ubuntu-latest\)")
+
+# No hardware lanes: every check is "base". The two functions stay so that
+# pipeline.py's calls keep working.
+PLATFORM_LANES = {}
+PLATFORM_HINTS = {}
 
 
 def signature(failures):
@@ -50,33 +42,38 @@ def signature(failures):
 
 
 def lane_platform(check_name):
-    workflow = check_name.split(" / ")[0]
-    return next((platform for marker, platform in PLATFORM_LANES.items() if marker in workflow), None)
+    return None
 
 
 def pr_platforms(snapshot):
-    text = " ".join([snapshot.get("title") or ""] + [f.get("path", "") for f in snapshot.get("files") or []])
-    return {platform for platform, hint in PLATFORM_HINTS.items() if hint.search(text)}
+    return set()
 
 
-# Rules that classify a CI failure without the agent. Only CI-infrastructure
-# signals: a crashed server also shows "connection reset", so generic network
-# errors are left to the agent.
-SETUP_STEP = re.compile(r"^(Set up job|Initialize containers|Run actions/checkout|Resolve runner_config|Export "
-                        r"|Download artifacts|Run \./\.github/actions/(check-pr-test-health|check-maintenance"
-                        r"|wait-for-jobs|download-[\w-]+))", re.I)
+def is_required(check_name):
+    """ubuntu-24.04 is the gate; ubuntu-latest is continue-on-error (noted,
+    never blocking) until T16 closes it. Anything else (a future job) is
+    treated as required so a new gate is never silently ignored."""
+    if OPTIONAL_JOB.search(check_name):
+        return False
+    return True
+
+
+# Rules that classify a CI failure without the agent: only CI-infrastructure
+# signals from GitHub-hosted runners and the apt/pip/npm install steps.
+SETUP_STEP = re.compile(r"^(Set up job|Initialize containers|Run actions/checkout|Run actions/setup-"
+                        r"|System tools|Python and browser-test tools|Post )", re.I)
 INFRA_LOG = re.compile(r"No space left on device|lost communication with the server"
                        r"|runner has received a shutdown signal|hosted runner encountered an error"
-                       r"|Could not resolve host: github\.com|API rate limit exceeded|Unable to download artifact"
-                       r"|Error response from daemon|failed to pull image"
-                       r"|(429|50[234]) (Client|Server) Error[^\n]*huggingface\.co", re.I)
-STATUS_JOB = re.compile(r"^(wait-for-[\w-]+|pr-test-finish|[\w-]+-finish)$")
+                       r"|Could not resolve host|API rate limit exceeded|Unable to download artifact"
+                       r"|E: Unable to (locate|fetch)|Temporary failure resolving|Hash Sum mismatch"
+                       r"|npm ERR! (network|ETIMEDOUT|ECONNRESET)|ReadTimeoutError|Connection timed out"
+                       r"|(429|50[234]) (Client|Server) Error", re.I)
+STATUS_JOB = re.compile(r"^(wait-for-[\w-]+|[\w-]+-finish)$")
 
 
 def rule_triage(failures):
     """Classify what the rules can; each failure needs `log_tail` and may have
-    `failed_step`. A failure without a readable log is left `unclassified`
-    (bounded reruns, never the agent: there is nothing to read)."""
+    `failed_step`. A failure without a readable log is left `unclassified`."""
     out = []
     for failure in failures:
         job, log = failure["name"].split(" / ")[-1], failure.get("log_tail") or ""
@@ -97,102 +94,74 @@ def rule_triage(failures):
 
 
 def assess(card, snapshot, ci_triage=None, extra_failures=(), exhausted=(), waived=()):
-    """ci_triage: the latest agent classification for this head and signature.
-    extra_failures: failed jobs of the targeted /rerun-test runs (always required).
-    exhausted: retry families ("rerun-failed", "rerun-cancelled", "rerun-test")
-    whose attempts are used up; what they could not fix becomes a note.
-    waived: job names the author showed to be unrelated (accepted by the agent)."""
+    """Return the CI assessment for the PR's current head. Pure function.
+
+    ci_triage: the latest agent classification for this head and signature.
+    extra_failures / exhausted: kept for pipeline.py; jj-agent sends no CI
+    commands, so `exhausted` only decides whether a cancelled job is reported
+    as such. waived: job names the author showed to be unrelated."""
     head = snapshot["headRefOid"]
-    labels = {label["name"] for label in snapshot.get("labels") or []}
-    review = card.get("review") or {}
     checks = summarize_checks(snapshot.get("statusCheckRollup"))
     counts = checks["counts"]
-    held = checks["gated"] if RUN_CI_LABEL not in labels else [
-        name for name in checks["gated"] if BASE_GATE.search(name)]
-    counts["not_requested"] = counts["gated"] - len(held)
-    counts["gated"] = len(held)
+    held = checks["gated"]  # jj-agent has no gate job; normally empty
+    counts["not_requested"] = 0
 
-    platforms = pr_platforms(snapshot)
-    required = lambda name: (lane_platform(name) or "base") in platforms | {"base"}  # noqa: E731
-    failures = [f for f in checks["failures"] if required(f["name"])] + list(extra_failures)
-    pending = [n for n in checks["pending"] if required(n)]
-    cancelled = [n for n in checks["cancelled"] if required(n)]
-    optional_failures = [f for f in checks["failures"] if not required(f["name"])]
+    failures = [f for f in checks["failures"] if is_required(f["name"])] + list(extra_failures)
+    pending = [n for n in checks["pending"] if is_required(n)]
+    cancelled = [n for n in checks["cancelled"] if is_required(n)]
+    optional_failures = [f for f in checks["failures"] if not is_required(f["name"])]
     notes = []
     if optional_failures:
-        lanes = sorted({f["name"].split(" / ")[0] for f in optional_failures})
-        notes.append(f"{len(optional_failures)} failure(s) on lanes this change does not need: " + ", ".join(lanes))
+        notes.append(f"{len(optional_failures)} failure(s) on the report-only ubuntu-latest leg (FFmpeg 8, "
+                     "continue-on-error until T16): " + ", ".join(sorted(f["name"] for f in optional_failures)))
 
-    suggestions = []
-    if RUN_CI_LABEL not in labels:
-        suggestions.append({"family": "tag-and-rerun", "command": "/tag-and-rerun-ci",
-                            "why": "no run-ci label, so the gate holds CI"})
-    targeted = review.get("targeted_tests") or []
-    if targeted:
-        suggestions.append({"family": "rerun-test", "command": "/rerun-test " + " ".join(targeted),
-                            "why": "default CI likely skips the related tests on the target hardware"})
+    suggestions = []  # no CI slash commands exist in jj-agent
 
     if pending:
         status = "running"
     elif failures:
         status = "failed"
     elif held:
-        status = "gated"  # the run-ci gate (label, cooldown) stopped the tests
-    elif cancelled and "rerun-cancelled" not in exhausted:
+        status = "gated"
+    elif cancelled:
         status = "cancelled"
     elif counts["success"] == 0:
         status = "not_started"
     else:
         status = "green"
-    if cancelled and "rerun-cancelled" in exhausted:
-        notes.append(f"{len(cancelled)} required job(s) stayed cancelled after reruns: " + ", ".join(cancelled[:3]))
-
-    if status == "cancelled" and RUN_CI_LABEL in labels:
-        suggestions.append({"family": "rerun-cancelled", "command": "/rerun-failed-ci",
-                            "why": f"{len(cancelled)} job(s) cancelled before finishing; cancelled is not passed"})
-    if status in ("gated", "not_started") and RUN_CI_LABEL in labels:
-        suggestions.append({"family": "tag-and-rerun", "command": "/tag-and-rerun-ci",
-                            "why": "CI has not started on this head"})
+    if cancelled:
+        notes.append(f"{len(cancelled)} required job(s) cancelled (a newer push or a manual cancel); "
+                     "cancelled is not passed: " + ", ".join(cancelled[:3]))
+    if status == "not_started":
+        notes.append("no check has run on this head yet; the `tests` workflow runs on every push")
 
     blocking, unrelated, retryable = [], [], []
     sig = signature(failures)
     if status == "failed":
-        classified, no_log, pending = {}, set(), set()
+        classified, no_log, pending_agent = {}, set(), set()
         if ci_triage and ci_triage.get("signature") == sig:
             classified = {f["name"]: f for f in ci_triage.get("failures", [])}
             no_log = set(ci_triage.get("no_log") or [])
-            pending = set(ci_triage.get("pending") or [])  # left for the agent's next window
+            pending_agent = set(ci_triage.get("pending") or [])
         for failure in failures:
             verdict = classified.get(failure["name"], {}).get("classification", "unclassified")
             evidence = classified.get(failure["name"], {}).get("evidence", "")
             if failure["name"] in no_log:
-                # No log was read: a "related" call is a guess, and there is nothing to quote.
                 verdict = "unclassified" if verdict == "related" else verdict
                 evidence = ""
             failure = dict(failure, classification=verdict, evidence=evidence,
-                           pending_agent=failure["name"] in pending)
+                           pending_agent=failure["name"] in pending_agent)
             if any(name and name in failure["name"] for name in waived):
                 unrelated.append(dict(failure, classification="unrelated, the author explained it"))
                 continue
-            targeted_job = failure["name"].startswith(TARGETED_PREFIX)
-            family = "rerun-test" if targeted_job else "rerun-failed"
-            if verdict in ("infra", "flaky") and family in exhausted:
-                unrelated.append(dict(failure, classification=f"{verdict}, persisted after retries"))
-                notes.append(f"{failure['name']} kept failing for {verdict} reasons after retries")
-            elif verdict in ("infra", "flaky"):
-                retryable.append(dict(failure, family=family))
+            if verdict in ("infra", "flaky"):
+                # Nothing to send automatically: a maintainer reruns with `gh run rerun --failed`.
+                retryable.append(dict(failure, family="rerun-failed"))
+                notes.append(f"{failure['name']} looks {verdict}; rerun by hand: gh run rerun <run-id> --failed")
             elif verdict == "unrelated":
                 unrelated.append(failure)
             else:
                 blocking.append(failure)
-        families = {f["family"] for f in retryable}
-        if "rerun-failed" in families:
-            suggestions.append({"family": "rerun-failed", "command": "/rerun-failed-ci",
-                                "why": "failures look like infra/flaky; bounded retries"})
-        if "rerun-test" in families and targeted:
-            for suggestion in suggestions:
-                if suggestion["family"] == "rerun-test":
-                    suggestion.update(retry=True, why="targeted tests failed for infra/flaky reasons; bounded retries")
 
     needs_triage = status == "failed" and not (ci_triage and ci_triage.get("signature") == sig)
     not_run = bool(pending or held or (status == "cancelled"))
@@ -201,7 +170,7 @@ def assess(card, snapshot, ci_triage=None, extra_failures=(), exhausted=(), waiv
         "head": head,
         "status": status,
         "checks": checks,
-        "platforms": sorted(platforms),
+        "platforms": [],
         "failures": failures,
         "signature": sig,
         "blocking": blocking,

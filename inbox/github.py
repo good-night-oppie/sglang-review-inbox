@@ -26,7 +26,7 @@ def gh(args, input_text=None, timeout=120, write=False):
     # failed mid-flight may still have landed, and the ledger handles that.
     for attempt in range(1 if write else 2):
         proc = subprocess.run(["gh", *args], input=input_text, capture_output=True,
-                              text=True, timeout=timeout)
+                              text=True, encoding="utf-8", errors="replace", timeout=timeout)
         if proc.returncode == 0:
             return proc.stdout
         if not TRANSIENT.search(proc.stderr):

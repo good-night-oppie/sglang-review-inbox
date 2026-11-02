@@ -184,7 +184,7 @@ def _placeholders(value, where=""):
 
 def _gh_login():
     try:
-        return subprocess.run(["gh", "api", "user", "--jq", ".login"], capture_output=True, text=True,
+        return subprocess.run(["gh", "api", "user", "--jq", ".login"], capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=60, check=True).stdout.strip()
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError("github_login is empty and `gh api user` failed; run `gh auth login` "

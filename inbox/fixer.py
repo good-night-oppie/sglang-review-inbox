@@ -38,7 +38,7 @@ class Checkout:
 
     def git(self, *args, check=True, timeout=900):
         proc = subprocess.run(["git", "-C", str(self.dir), *self.identity, *args],
-                              capture_output=True, text=True, timeout=timeout)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
         if check and proc.returncode != 0:
             raise FixError(f"git {args[0]}: {(proc.stderr or proc.stdout).strip()[-300:]}")
         return proc
@@ -78,7 +78,7 @@ class Checkout:
         for _ in range(2):  # formatters may need a second pass to settle
             try:
                 subprocess.run(["pre-commit", "run", "--files", *existing], cwd=self.dir,
-                               capture_output=True, text=True, timeout=900)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900)
             except (OSError, subprocess.TimeoutExpired):
                 return
 
@@ -86,7 +86,7 @@ class Checkout:
         for f in files:
             if f.endswith(".py") and (self.dir / f).exists():
                 proc = subprocess.run(["python3", "-m", "py_compile", f], cwd=self.dir,
-                                      capture_output=True, text=True, timeout=120)
+                                      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
                 if proc.returncode != 0:
                     raise FixError(f"{f} does not compile: {proc.stderr.strip()[-300:]}")
 

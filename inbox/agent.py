@@ -99,7 +99,7 @@ def render(template_name, **values):
 
 def _git(repo_dir, *args, timeout=600):
     proc = subprocess.run(["git", "-C", str(repo_dir), *args], capture_output=True,
-                          text=True, timeout=timeout)
+                          text=True, encoding="utf-8", errors="replace", timeout=timeout)
     if proc.returncode != 0:
         raise AgentError(f"git {' '.join(args[:2])}: {proc.stderr.strip()[:400]}")
     return proc.stdout
@@ -135,7 +135,7 @@ class Workspace:
             self.mirror.parent.mkdir(parents=True, exist_ok=True)
             proc = subprocess.run(["git", "clone", "--filter=blob:none", "--no-checkout",
                                    self.clone_url, str(self.mirror)],
-                                  capture_output=True, text=True, timeout=3600)
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
             if proc.returncode != 0:
                 shutil.rmtree(self.mirror, ignore_errors=True)
                 raise AgentError(f"git clone: {proc.stderr.strip()[-400:]}")
@@ -272,7 +272,7 @@ def run_codex(config, cmd, prompt, cwd, label):
     for home in ready:
         env = dict(os.environ, CODEX_HOME=home) if home else None
         try:
-            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, cwd=cwd,
+            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=cwd,
                                   timeout=config["agent"]["timeout_seconds"], env=env)
         except subprocess.TimeoutExpired as exc:
             raise AgentError(f"{label}: timed out after {config['agent']['timeout_seconds']}s") from exc
@@ -350,7 +350,7 @@ def run_agent(config, prompt, schema, workspace, label, profile=None, skill_dir=
         proc, account = run_codex(config, cmd, prompt, run_dir, label)
     else:
         try:
-            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace",
                                   cwd=run_dir, timeout=agent["timeout_seconds"])
         except subprocess.TimeoutExpired as exc:
             raise AgentError(f"{label}: timed out after {agent['timeout_seconds']}s") from exc

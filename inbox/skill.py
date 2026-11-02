@@ -24,7 +24,7 @@ class SkillSyncError(RuntimeError):
 
 
 def _git(cwd, *args, timeout=900):
-    proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=timeout)
+    proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     if proc.returncode != 0:
         raise SkillSyncError(f"git {' '.join(args[:2])}: {proc.stderr.strip()[-300:]}")
     return proc.stdout.strip()
@@ -64,7 +64,7 @@ class SkillSync:
             cmd = ["git", "clone", "--branch", self.branch]
             if self.seed and (self.seed / ".git").exists():
                 cmd += ["--reference-if-able", str(self.seed), "--dissociate"]
-            proc = subprocess.run([*cmd, self.url, str(self.clone)], capture_output=True, text=True, timeout=1800)
+            proc = subprocess.run([*cmd, self.url, str(self.clone)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800)
             if proc.returncode != 0:
                 raise SkillSyncError(f"git clone: {proc.stderr.strip()[-300:]}")
         _git(self.clone, "fetch", "--quiet", "origin", self.branch)

@@ -761,6 +761,15 @@ class Pipeline:
         if verdict != review["verdict"]:
             review = dict(review, verdict=verdict)
             self.store.update_pr(key, review=review)
+        # Approval is a current decision, not a permanent property of the SHA.
+        # reviewDecision survives a push; only a latest CHANGES_REQUESTED bound to this head blocks it.
+        if self.changes_requested_on_head(snap.get("reviews") or [], head):
+            decision = dict(card["decision"])
+            decision.pop("approved_head", None)
+            decision["merge_ready"] = False
+            self.store.update_pr(key, decision=decision)
+            self.store.set_stage(key, "needs_author", "GitHub review requests changes on this head")
+            return
         approved = self.approved_this_head(card, head)
         if decision.get("approve_head") == head and not approved:
             self.approve(key, note="", by="you, in a GitHub comment")  # you said LGTM on the PR
@@ -952,6 +961,20 @@ class Pipeline:
         if maintainer:
             decision.update(needs_you_head=head, needs_you_reason="the author disputes a finding: " + maintainer[0][:200])
         self.store.update_pr(key, decision=decision)
+
+    @staticmethod
+    def changes_requested_on_head(reviews, head):
+        latest = {}
+        for review in reviews:
+            author = (review.get("author") or {}).get("login")
+            if not author or review.get("state") not in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+                continue
+            previous = latest.get(author)
+            if previous is None or (review.get("submittedAt") or "") >= (previous.get("submittedAt") or ""):
+                latest[author] = review
+        return any(review["state"] == "CHANGES_REQUESTED"
+                   and (review.get("commit") or {}).get("oid") == head
+                   for review in latest.values())
 
     def approved_this_head(self, card, head):
         if card["decision"].get("approved_head") == head:

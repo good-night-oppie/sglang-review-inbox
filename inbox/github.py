@@ -8,7 +8,7 @@ import subprocess
 PR_FIELDS = (
     "number,title,author,url,state,isDraft,headRefOid,baseRefName,additions,deletions,"
     "changedFiles,files,labels,mergeable,mergeStateStatus,reviewDecision,body,"
-    "statusCheckRollup,commits,latestReviews,createdAt,updatedAt,mergedBy"
+    "statusCheckRollup,commits,latestReviews,reviews,createdAt,updatedAt,mergedBy"
 )
 PR_URL = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
 JOB_URL = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/actions/runs/(\d+)/job/(\d+)")

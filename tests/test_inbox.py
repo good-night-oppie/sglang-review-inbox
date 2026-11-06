@@ -685,6 +685,44 @@ class PipelineTest(unittest.TestCase):
         self.pipe.advance(self.store.get_pr(self.key))
         return self.store.get_pr(self.key)
 
+    def test_changes_requested_retracts_approval_on_same_head(self):
+        self.addCleanup(self.store.conn.close)  # Windows: close SQLite before TemporaryDirectory cleanup
+        self.assertIn("reviews", github.PR_FIELDS.split(","))  # latestReviews can omit commit.oid
+        card = self.advance()
+        self.assertEqual(card["review_head"], HEAD)
+        self.store.update_pr(self.key, stage="approved",
+                             decision=dict(card["decision"], approved_head=HEAD))
+        self.approved = {HEAD}  # GitHub REST still contains the historical APPROVED review
+        self.snap["reviewDecision"] = "CHANGES_REQUESTED"
+        self.snap["latestReviews"] = [{"author": {"login": "BBuf"}, "state": "CHANGES_REQUESTED", "commit": {}}]
+        self.snap["reviews"] = [
+            {"author": {"login": "BBuf"}, "state": "APPROVED", "commit": {"oid": HEAD}, "submittedAt": "2026-11-05T17:16:20Z"},
+            {"author": {"login": "BBuf"}, "state": "CHANGES_REQUESTED", "commit": {"oid": HEAD}, "submittedAt": "2026-11-06T05:24:10Z"},
+        ]
+        card = self.advance()
+        self.assertEqual(card["stage"], "needs_author")
+        self.assertNotEqual(card["decision"].get("approved_head"), HEAD)
+        self.assertFalse(card["decision"].get("merge_ready", False))
+        self.assertNotIn(("APPROVE", HEAD), [w[:2] for w in self.writes])
+
+    def test_changes_requested_on_old_head_waits_for_rereview(self):
+        self.addCleanup(self.store.conn.close)
+        card = self.advance()
+        self.store.update_pr(
+            self.key, stage="queued", review=dict(card["review"], head=NEW_HEAD), review_head=NEW_HEAD,
+            decision=dict(card["decision"], approved_head=HEAD))
+        self.approved = {HEAD}
+        self.snap = snapshot(head=NEW_HEAD)
+        self.snap["reviewDecision"] = "CHANGES_REQUESTED"  # GitHub keeps this after the author pushes
+        self.snap["reviews"] = [
+            {"author": {"login": "BBuf"}, "state": "CHANGES_REQUESTED", "commit": {"oid": HEAD}, "submittedAt": "2026-11-05T17:13:38Z"},
+            {"author": {"login": "BBuf"}, "state": "COMMENTED", "commit": {"oid": NEW_HEAD}, "submittedAt": "2026-11-06T17:39:56Z"},
+        ]
+        card = self.advance()
+        self.assertEqual(card["stage"], "ready")
+        self.assertEqual(card["decision"].get("ready_kind"), "approve")
+        self.assertFalse(card["decision"].get("merge_ready", False))
+
     @unittest.skip("jj-agent overlay: SGLang CI slash commands (/tag-and-rerun-ci, /rerun-test), run-ci label and hardware lanes do not exist in jj-agent; see tests/test_jj_agent_adapter.py")
     def test_full_flow_shadow_then_approve(self):
         card = self.advance()  # triage → review job runs inline

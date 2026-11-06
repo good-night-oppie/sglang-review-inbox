@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 import sys
@@ -597,7 +598,7 @@ class AgentProfileTest(unittest.TestCase):
             Path(cmd[cmd.index("-o") + 1]).write_text('{"ok": true}')
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
-        with mock.patch.object(agent.subprocess, "run", side_effect=fake_run):
+        with mock.patch.object(agent, "_run_tree", side_effect=fake_run):
             _, info = agent.run_agent(self.config, "p", {}, self.ws, job, agent.profile_for(self.config, job))
         return seen["cmd"], info
 
@@ -2277,7 +2278,7 @@ class CodexAccountTest(unittest.TestCase):
             code, err = outcomes[home]
             return subprocess.CompletedProcess(cmd, code, "", err)
 
-        with mock.patch.object(agent.subprocess, "run", side_effect=fake_run):
+        with mock.patch.object(agent, "_run_tree", side_effect=fake_run):
             proc, account = agent.run_codex(self.config, ["codex"], "p", "/tmp", "review")
         return calls, proc, account
 
@@ -2408,6 +2409,40 @@ class FakeWorkspace:
 
     def cleanup(self):
         pass
+
+
+
+class RunTreeTimeoutTest(unittest.TestCase):
+    """A timed-out agent must not leave its helper processes running."""
+
+    def alive(self, pid):
+        if os.name == "nt":
+            out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+            return str(pid) in out
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def test_timeout_kills_grandchildren(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = Path(tmp) / "grandchild.pid"
+            child = ("import subprocess,sys,time;"
+                     "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)']);"
+                     f"open({str(pidfile)!r},'w').write(str(p.pid));time.sleep(120)")
+            with self.assertRaises(subprocess.TimeoutExpired):
+                agent._run_tree([sys.executable, "-c", child], input="", text=True, timeout=5)
+            grandchild = int(pidfile.read_text())
+            deadline = time.time() + 10
+            while self.alive(grandchild) and time.time() < deadline:
+                time.sleep(0.2)
+            self.assertFalse(self.alive(grandchild))
+
+    def test_normal_run_returns_output(self):
+        proc = agent._run_tree([sys.executable, "-c", "import sys;print(sys.stdin.read().upper())"],
+                               input="ok", text=True, timeout=30)
+        self.assertEqual((proc.returncode, proc.stdout.strip()), (0, "OK"))
 
 
 if __name__ == "__main__":

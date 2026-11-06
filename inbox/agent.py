@@ -262,6 +262,37 @@ def account_email(home):
     return _emails[home] or (home or "default")
 
 
+
+def _run_tree(cmd, *, timeout, **kw):
+    """subprocess.run that, on timeout, kills the whole process tree (codex starts
+    helper processes of its own; plain run() would only kill the top one on Windows)."""
+    if os.name == "nt":
+        kw.setdefault("creationflags", subprocess.CREATE_NEW_PROCESS_GROUP)
+    else:
+        kw.setdefault("start_new_session", True)
+    stdin = kw.pop("input", None)
+    with subprocess.Popen(cmd, stdin=subprocess.PIPE if stdin is not None else None,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw) as proc:
+        try:
+            out, err = proc.communicate(stdin, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            proc.communicate()
+            raise
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+
+def _kill_tree(proc):
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        import signal
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    proc.kill()
+
 def run_codex(config, cmd, prompt, cwd, label):
     """Run `codex exec`, falling back to the next account on a usage limit or
     spend cap. Returns (process, account email)."""
@@ -272,8 +303,8 @@ def run_codex(config, cmd, prompt, cwd, label):
     for home in ready:
         env = dict(os.environ, CODEX_HOME=home) if home else None
         try:
-            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=cwd,
-                                  timeout=config["agent"]["timeout_seconds"], env=env)
+            proc = _run_tree(cmd, input=prompt, text=True, encoding="utf-8", errors="replace", cwd=cwd,
+                             timeout=config["agent"]["timeout_seconds"], env=env)
         except subprocess.TimeoutExpired as exc:
             raise AgentError(f"{label}: timed out after {config['agent']['timeout_seconds']}s") from exc
         if usage_hook:
@@ -350,8 +381,8 @@ def run_agent(config, prompt, schema, workspace, label, profile=None, skill_dir=
         proc, account = run_codex(config, cmd, prompt, run_dir, label)
     else:
         try:
-            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                  cwd=run_dir, timeout=agent["timeout_seconds"])
+            proc = _run_tree(cmd, input=prompt, text=True, encoding="utf-8", errors="replace",
+                             cwd=run_dir, timeout=agent["timeout_seconds"])
         except subprocess.TimeoutExpired as exc:
             raise AgentError(f"{label}: timed out after {agent['timeout_seconds']}s") from exc
     (run_dir / "stdout.txt").write_text(proc.stdout or "")

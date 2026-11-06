@@ -1,3 +1,5 @@
+import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -76,6 +78,340 @@ class TriageTest(unittest.TestCase):
                  {"path": "test/export-frame-zh.test.js", "additions": 33, "deletions": 0}]
         reasons = " ".join(g["reason"] for g in triage(snapshot(files=files, body="fix the export"), POLICY)["gates"])
         self.assertNotIn("no test commands", reasons)
+
+    # ---- size gate: lines to review, lockfiles, QQ-recorded size exceptions ------------------------------------
+    SZ_HEAD = "1fcbed24" + "0" * 32
+    SZ_KEY = "good-night-oppie/MontClip#109"
+    SZ_VEND = [{"path": "agent-ui/cindy-43001ea/a.js", "additions": 3000, "deletions": 0},
+               {"path": "agent-ui/cindy-43001ea/b.js", "additions": 3000, "deletions": 50}]
+    SZ_GEN = [{"path": "cindy-parts.css", "additions": 2991, "deletions": 0}]
+    SZ_LOCK = [{"path": "agent-ui/package-lock.json", "additions": 1000, "deletions": 40}]
+    SZ_HAND = [{"path": "agent-ui/styles.cjs", "additions": 120, "deletions": 8},
+               {"path": "test/cindy-parts.test.js", "additions": 200, "deletions": 0}]
+
+    @staticmethod
+    def sz_total(files):
+        return sum(f["additions"] + f["deletions"] for f in files)
+
+    def sz_pr(self, files, head=None, number=109, drop_files=False, **extra):
+        pr = snapshot(files=files, head=head or self.SZ_HEAD)
+        pr["number"], pr["url"] = number, f"https://github.com/good-night-oppie/MontClip/pull/{number}"
+        pr.update(extra)
+        if drop_files:  # the per-file query failed: totals are known, the list is empty
+            pr["files"] = []
+        return pr
+
+    def sz_exception(self, review=None, vendored=None, generated=None, key=None):
+        paths = [f["path"] for f in self.SZ_VEND + self.SZ_GEN]
+        rev = {"by": "QQ", "source": "QQ review of the current head (demo record)", "verdict": "accepted",
+               "head": self.SZ_HEAD, "files": paths}
+        vend = {"kind": "vendored", "files": [f["path"] for f in self.SZ_VEND],
+                "upstream": {"repo": "good-night-oppie/cindy", "commit": "43001eaa" + "0" * 32},
+                "licence": "MIT, checked by QQ", "verified": {"byte_identical": True, "method": "git blob sha1 + sha256"}}
+        gen = {"kind": "generated", "files": [f["path"] for f in self.SZ_GEN],  # this repo's output: no upstream at all
+               "generated": {"inputs": ["agent-ui/cindy-43001ea/globals.css"], "command": "node scripts/build-parts.js",
+                             "result_sha256": {"cindy-parts.css": "a" * 64}, "reproduced": True,
+                             "record": "QQ reproduction record (demo)"}}
+        rev.update(review or {})
+        vend.update(vendored or {})
+        gen.update(generated or {})
+        return {key or self.SZ_KEY: {"review": rev, "groups": [vend, gen]}}
+
+    def sz_run(self, files, exceptions=None, **kwargs):
+        policy = dict(POLICY, size_exceptions=exceptions or {}, size_exceptions_trusted_source=kwargs.pop("trusted", True))
+        policy.update(kwargs.pop("policy", {}))
+        result = triage(self.sz_pr(files, **kwargs), policy)
+        return result, {g["id"]: g for g in result["gates"]}
+
+    def test_lockfile_is_excluded_by_exact_name_only_and_never_hides_the_total(self):
+        result, gates = self.sz_run(self.SZ_LOCK)
+        self.assertNotIn("size", gates)
+        self.assertEqual(result["lines"], 1040)  # the total additions+deletions is always kept
+        self.assertEqual(result["excluded_files"], [{"path": "agent-ui/package-lock.json", "lines": 1040, "why": "lockfile"}])
+        self.assertEqual(gates["provenance"]["kind"], "human")
+        self.assertIn("agent-ui/package-lock.json (1040 lines, lockfile)", gates["provenance"]["reason"])
+        self.assertIn("install scripts", gates["provenance"]["reason"])
+        # names that merely look like lockfiles are counted
+        look_alike = [{"path": "docs/package-lock.json.md", "additions": 2600, "deletions": 0},
+                      {"path": "my-yarn.lock", "additions": 10, "deletions": 0}]
+        result, gates = self.sz_run(look_alike)
+        self.assertEqual(result["excluded_lines"], 0)
+        self.assertIn("size", gates)
+        # a lockfile cannot hide hand-written lines: the reason shows the total and what was not counted
+        result, gates = self.sz_run(self.SZ_LOCK + [{"path": "scripts/clip.py", "additions": 2600, "deletions": 0}])
+        self.assertIn("2600 changed lines", gates["size"]["reason"])
+        self.assertIn("3640 total additions+deletions, 1040 not counted", gates["size"]["reason"])
+        # excluding a lockfile adds no blocking: nothing here is an author gate
+        self.assertEqual([g["kind"] for g in self.sz_run(self.SZ_LOCK)[0]["gates"] if g["kind"] == "author"], [])
+
+    def test_global_path_exclusion_and_pr_text_are_not_evidence(self):
+        files = self.SZ_VEND + self.SZ_GEN + self.SZ_HAND
+        # a size_exclude glob list (the old design) has no effect at all
+        result, gates = self.sz_run(files, policy={"size_exclude": ["agent-ui/cindy-43001ea/*", "cindy-parts.css"]})
+        self.assertIn("size", gates)
+        self.assertEqual(result["excluded_lines"], 0)
+        # the description claiming upstream commit, sha256 identity, licence and reproducibility proves nothing
+        body = "Vendored from cindy@43001eaa00000000000000000000000000000000, sha256 identical to upstream, MIT, output reproduced by node scripts/build-parts.js\n" + "pytest test/x.py passed"
+        result, gates = self.sz_run(files, body=body)
+        self.assertIn("size", gates)
+        self.assertEqual(result["excluded_lines"], 0)
+        # a record kept for another PR does not apply here
+        result, gates = self.sz_run(files, exceptions=self.sz_exception(), number=110)
+        self.assertIn("size", gates)
+
+    def test_accepted_head_bound_qq_review_exempts_exactly_the_listed_files(self):
+        files = self.SZ_VEND + self.SZ_GEN + self.SZ_LOCK + self.SZ_HAND
+        result, gates = self.sz_run(files, exceptions=self.sz_exception())
+        self.assertNotIn("size", gates)
+        self.assertEqual(result["lines"], self.sz_total(files))  # the total stays visible
+        self.assertEqual(result["counted_lines"], self.sz_total(self.SZ_HAND))
+        self.assertEqual(result["excluded_lines"], self.sz_total(self.SZ_VEND + self.SZ_GEN + self.SZ_LOCK))
+        self.assertTrue(result["size_exception"].startswith("applied"))
+        self.assertEqual(sorted(f["path"] for f in result["excluded_files"]),
+                         sorted(f["path"] for f in self.SZ_VEND + self.SZ_GEN + self.SZ_LOCK))
+        # still a human check, and it says what the exception is not and whose judgments these are
+        reason = gates["provenance"]["reason"]
+        self.assertEqual(gates["provenance"]["kind"], "human")
+        self.assertIn("agent-ui/cindy-43001ea/a.js (3000 lines, QQ-recorded exception, vendored)", reason)
+        self.assertIn("cindy-parts.css (2991 lines, QQ-recorded exception, generated)", reason)
+        self.assertIn("not a code approval or a merge permission", reason)
+        self.assertIn("QQ's recorded judgments, not verified by this tool", reason)
+
+    def test_generated_output_of_this_repo_needs_no_upstream_but_its_own_evidence(self):
+        # only the generated group is recorded: no upstream repo / commit anywhere, and it is applied
+        files = self.SZ_GEN + self.SZ_HAND
+        exc = self.sz_exception(review={"files": ["cindy-parts.css"]})
+        exc[self.SZ_KEY]["groups"] = [exc[self.SZ_KEY]["groups"][1]]
+        self.assertNotIn("upstream", str(exc[self.SZ_KEY]["groups"][0]))
+        result, gates = self.sz_run(files + [{"path": "scripts/clip.py", "additions": 2600, "deletions": 0}], exceptions=exc)
+        self.assertTrue(result["size_exception"].startswith("applied"))
+        self.assertEqual(result["excluded_lines"], 2991)
+        # while a third-party copy without its upstream is refused
+        vend_only = self.sz_exception(vendored={"upstream": {}})
+        self.assertIn("vendored group not applied (no upstream repo)", self.sz_run(self.SZ_VEND + self.SZ_HAND, exceptions=vend_only)[0]["size_exception"])
+
+    def test_size_exception_falls_back_to_counting_everything(self):
+        files = self.SZ_VEND + self.SZ_GEN + self.SZ_LOCK + self.SZ_HAND
+        lock_only = self.sz_total(files) - self.sz_total(self.SZ_LOCK)
+        # evidence missing or malformed in one group: that group is counted in full, the other still applies
+        broken = {
+            "vendored: no licence": dict(vendored={"licence": ""}),
+            "vendored: no upstream commit": dict(vendored={"upstream": {"repo": "good-night-oppie/cindy"}}),
+            "vendored: mutable ref instead of a commit": dict(vendored={"upstream": {"repo": "good-night-oppie/cindy", "commit": "main"}}),
+            "vendored: short commit": dict(vendored={"upstream": {"repo": "good-night-oppie/cindy", "commit": "43001eaa"}}),
+            "vendored: no upstream repo": dict(vendored={"upstream": {"commit": "43001eaa" + "0" * 32}}),
+            "vendored: byte identity not recorded": dict(vendored={"verified": {"method": "sha"}}),
+            "vendored: byte identity failed": dict(vendored={"verified": {"byte_identical": False, "method": "sha"}}),
+            "vendored: no exact file list": dict(vendored={"files": []}),
+            "vendored: a glob instead of exact files": dict(vendored={"files": ["agent-ui/cindy-43001ea/*"]}),
+            "vendored: a directory instead of exact files": dict(vendored={"files": ["agent-ui/cindy-43001ea/"]}),
+            "vendored: unreadable upstream": dict(vendored={"upstream": "good-night-oppie/cindy@main"}),
+            "generated: no input files": dict(generated={"generated": {"command": "node b.js", "result_sha256": {"cindy-parts.css": "a" * 64}, "reproduced": True, "record": "r"}}),
+            "generated: no command": dict(generated={"generated": {"inputs": ["x.css"], "result_sha256": {"cindy-parts.css": "a" * 64}, "reproduced": True, "record": "r"}}),
+            "generated: no result hash": dict(generated={"generated": {"inputs": ["x.css"], "command": "node b.js", "reproduced": True, "record": "r"}}),
+            "generated: malformed result hash": dict(generated={"generated": {"inputs": ["x.css"], "command": "node b.js", "result_sha256": {"cindy-parts.css": "abc"}, "reproduced": True, "record": "r"}}),
+            "generated: not reproducible": dict(generated={"generated": {"inputs": ["x.css"], "command": "node b.js", "result_sha256": {"cindy-parts.css": "a" * 64}, "reproduced": False, "record": "r"}}),
+            "generated: reproduction record missing": dict(generated={"generated": {"inputs": ["x.css"], "command": "node b.js", "result_sha256": {"cindy-parts.css": "a" * 64}, "reproduced": True}}),
+        }
+        for name, over in broken.items():
+            with self.subTest(name):
+                result, gates = self.sz_run(files, exceptions=self.sz_exception(**over))
+                bad_group = "vendored" if "vendored" in over else "generated"
+                kept = {f["path"] for f in result["excluded_files"]}
+                for f in (self.SZ_VEND if bad_group == "vendored" else self.SZ_GEN):
+                    self.assertNotIn(f["path"], kept)  # the broken group is counted in full
+                self.assertIn("agent-ui/package-lock.json", kept)  # the lockfile is still excluded by name
+                self.assertIn(f"{bad_group} group not applied", result["size_exception"])
+                self.assertIn("size", gates)  # still over the limit once those lines count
+                reason = gates["provenance"]["reason"]
+                # partially applied: the other group still is, and QQ is told WHICH group failed and WHY
+                self.assertTrue(result["size_exception"].startswith("applied"), result["size_exception"])
+                self.assertRegex(reason, rf"{bad_group} group not applied \(.+?\)")
+                self.assertIn("the files of the group that is not applied are counted in full; the groups recorded completely stay applied", reason)
+                self.assertRegex(reason, r"applied to \d+ file\(s\); " + bad_group + r" group not applied \(.+?\); the files of the group")
+                self.assertNotIn("every line is counted", reason)  # the other group's files ARE excluded
+                self.assertNotIn("normal counting is restored", reason)  # that wording is only for "nothing applied"
+
+        with self.subTest("nothing applied: both groups broken"):
+            exc = self.sz_exception(vendored={"licence": ""}, generated={"generated": {"inputs": ["x.css"], "command": "node b.js", "reproduced": False}})
+            result, gates = self.sz_run(files, exceptions=exc)
+            reason = gates["provenance"]["reason"]
+            self.assertTrue(result["size_exception"].startswith("not applied"), result["size_exception"])
+            self.assertEqual(result["excluded_lines"], self.sz_total(self.SZ_LOCK))
+            self.assertIn("vendored group not applied (no licence recorded)", reason)
+            self.assertIn("generated group not applied", reason)
+            self.assertIn("normal counting is restored, only the defined lockfile exclusion stays", reason)
+            self.assertNotIn("stay applied", reason)
+            self.assertNotIn("recorded completely", reason)
+
+        # the review itself is not trusted: everything is counted, only the lockfile stays out
+        reviews = {
+            "review verdict is rejected": dict(review={"verdict": "rejected"}),
+            "review verdict is pending": dict(review={"verdict": "pending"}),
+            "review verdict missing": dict(review={"verdict": ""}),
+            "review not by QQ": dict(review={"by": "BB"}),
+            "review source missing": dict(review={"source": ""}),
+            "review head abbreviated": dict(review={"head": self.SZ_HEAD[:8]}),
+            "review head changed after QQ looked": dict(review={"head": "deadbeef" + "0" * 32}),
+            "review head missing": dict(review={"head": ""}),
+            "review lists no files": dict(review={"files": []}),
+            "review lists a glob": dict(review={"files": ["agent-ui/cindy-43001ea/*"]}),
+        }
+        for name, over in reviews.items():
+            with self.subTest(name):
+                result, gates = self.sz_run(files, exceptions=self.sz_exception(**over))
+                self.assertEqual(result["excluded_lines"], self.sz_total(self.SZ_LOCK))
+                self.assertEqual(result["counted_lines"], lock_only)
+                self.assertTrue(result["size_exception"].startswith("not applied"), result["size_exception"])
+                self.assertIn("size", gates)
+                self.assertIn("QQ size exception not applied", gates["provenance"]["reason"])
+
+        with self.subTest("abbreviated head is refused because it is abbreviated"):
+            result, _ = self.sz_run(files, exceptions=self.sz_exception(review={"head": self.SZ_HEAD[:8]}))
+            self.assertIn("exact 40-hex", result["size_exception"])
+        with self.subTest("report wording: normal counting is restored, only the lockfile exclusion stays"):
+            result, gates = self.sz_run(files, exceptions=self.sz_exception(review={"head": "deadbeef" + "0" * 32}))
+            reason = gates["provenance"]["reason"]
+            self.assertIn("normal counting is restored, only the defined lockfile exclusion stays", reason)
+            self.assertNotIn("every line is counted", reason)
+            self.assertEqual(result["counted_lines"], self.sz_total(files) - self.sz_total(self.SZ_LOCK))  # 10276, not 11316
+
+        # a record that cannot be read trustworthily never raises and never exempts anything
+        unreadable = {
+            "deviating is not a list (passes every explicit check, then fails)": self.sz_exception(
+                vendored={"verified": {"byte_identical": True, "method": "sha", "deviating": 5}})[self.SZ_KEY],
+            "record is a string": "QQ said yes",
+            "review is a list": {"review": ["QQ"], "groups": []},
+            "groups is a dict": {"review": self.sz_exception()[self.SZ_KEY]["review"], "groups": {"kind": "vendored"}},
+            "groups is empty": {"review": self.sz_exception()[self.SZ_KEY]["review"], "groups": []},
+            "group is a string": {"review": self.sz_exception()[self.SZ_KEY]["review"], "groups": ["vendored"]},
+        }
+        for name, record in unreadable.items():
+            with self.subTest(name):
+                result, gates = self.sz_run(files, exceptions={self.SZ_KEY: record})
+                self.assertEqual(result["excluded_lines"], self.sz_total(self.SZ_LOCK))
+                self.assertIn("size", gates)
+                self.assertTrue(result["size_exception"].startswith("not applied"), result["size_exception"])
+                if name.startswith("deviating"):
+                    self.assertEqual(result["size_exception"], "not applied: record unreadable")
+        with self.subTest("policy size_exceptions itself is not a mapping"):
+            self.assertIn("size", self.sz_run(files, exceptions=["good-night-oppie/MontClip#109"])[1])
+
+    def test_exception_binds_to_the_full_40_hex_head_only(self):
+        files = self.SZ_VEND + self.SZ_GEN + self.SZ_LOCK + self.SZ_HAND
+        lock = self.sz_total(self.SZ_LOCK)
+        new_head = "aaaaaaaa" + "0" * 32
+        # a short prefix (even one that is a prefix of the real head) is never an authorization match
+        prefixes = {"8-char prefix": self.SZ_HEAD[:8], "12-char prefix": self.SZ_HEAD[:12], "39 of 40 chars": self.SZ_HEAD[:39]}
+        for name, head in prefixes.items():
+            with self.subTest(name):
+                result, gates = self.sz_run(files, exceptions=self.sz_exception(review={"head": head}))
+                self.assertIn("exact 40-hex", result["size_exception"])
+                self.assertEqual(result["excluded_lines"], lock)
+                self.assertIn("size", gates)
+        # a different commit that shares the first 8 chars is a different head; the shown prefixes tell them apart
+        look_alike = self.SZ_HEAD[:8] + "1" * 32
+        result, gates = self.sz_run(files, exceptions=self.sz_exception(review={"head": look_alike}))
+        self.assertEqual(result["excluded_lines"], lock)
+        reviewed, current = re.search(r"reviewed (\w+) but the PR head is (\w+)", result["size_exception"]).groups()
+        self.assertNotEqual(reviewed, current)
+        self.assertGreater(len(reviewed), 8)  # 8 chars would have shown two identical strings
+        # the full head is accepted
+        result, _ = self.sz_run(files, exceptions=self.sz_exception())
+        self.assertTrue(result["size_exception"].startswith("applied"))
+        # a new head invalidates the same record, and the report says what happens instead
+        result, gates = self.sz_run(files, exceptions=self.sz_exception(), head=new_head)
+        self.assertIn("stale: reviewed 1fcbed24 but the PR head is aaaaaaaa", result["size_exception"])
+        self.assertEqual(result["excluded_lines"], lock)
+        self.assertIn("normal counting is restored, only the defined lockfile exclusion stays", gates["provenance"]["reason"])
+        # a review of the new full head applies again
+        result, _ = self.sz_run(files, exceptions=self.sz_exception(review={"head": new_head}), head=new_head)
+        self.assertTrue(result["size_exception"].startswith("applied"))
+        # an abbreviated head on the PR side is not a head either
+        result, _ = self.sz_run(files, exceptions=self.sz_exception(), head=self.SZ_HEAD[:8])
+        self.assertEqual(result["size_exception"], "not applied: PR head unknown")
+
+    def test_size_exception_does_not_cover_deviating_or_unreviewed_or_new_files(self):
+        files = self.SZ_VEND + self.SZ_GEN + self.SZ_LOCK + self.SZ_HAND
+        # a third-party file that deviates from its upstream is counted in full, the identical one is still exempt
+        exc = self.sz_exception(vendored={"verified": {"byte_identical": True, "method": "sha", "deviating": ["agent-ui/cindy-43001ea/a.js"]}})
+        result, gates = self.sz_run(files, exceptions=exc)
+        kept = {f["path"] for f in result["excluded_files"]}
+        self.assertNotIn("agent-ui/cindy-43001ea/a.js", kept)
+        self.assertIn("agent-ui/cindy-43001ea/b.js", kept)
+        self.assertEqual(result["counted_lines"], self.sz_total(self.SZ_HAND) + 3000)
+        self.assertIn("size", gates)
+        # a path added to the vendored directory but not on the list is counted in full
+        added = [{"path": "agent-ui/cindy-43001ea/new.js", "additions": 2600, "deletions": 0}]
+        result, gates = self.sz_run(files + added, exceptions=self.sz_exception())
+        self.assertNotIn("agent-ui/cindy-43001ea/new.js", {f["path"] for f in result["excluded_files"]})
+        self.assertEqual(result["counted_lines"], self.sz_total(self.SZ_HAND) + 2600)
+        self.assertIn("size", gates)
+        # per-file scope: a file in the group's list that QQ's review does not list is counted in full
+        exc = self.sz_exception(review={"files": ["agent-ui/cindy-43001ea/b.js", "cindy-parts.css"]})
+        result, gates = self.sz_run(files, exceptions=exc)
+        kept = {f["path"] for f in result["excluded_files"]}
+        self.assertNotIn("agent-ui/cindy-43001ea/a.js", kept)
+        self.assertIn("agent-ui/cindy-43001ea/b.js", kept)
+        self.assertIn("size", gates)
+        # a reviewed file that is not in this PR any more exempts nothing
+        gone = self.sz_exception(vendored={"files": ["agent-ui/cindy-43001ea/gone.js"]}, review={"files": ["agent-ui/cindy-43001ea/gone.js", "cindy-parts.css"]})
+        result, gates = self.sz_run(files, exceptions=gone)
+        self.assertNotIn("agent-ui/cindy-43001ea/a.js", {f["path"] for f in result["excluded_files"]})
+
+    def test_exceptions_apply_only_from_a_confirmed_controlled_entry(self):
+        files = self.SZ_VEND + self.SZ_GEN + self.SZ_LOCK + self.SZ_HAND
+        lock = self.sz_total(self.SZ_LOCK)
+        record = self.sz_exception()
+        # a perfect record is still ignored while its origin is not attested (the flag is absent in config defaults)
+        self.assertIs(POLICY.get("size_exceptions_trusted_source"), False)
+        result = triage(self.sz_pr(files), dict(POLICY, size_exceptions=record))
+        self.assertIn("origin not confirmed", result["size_exception"])
+        self.assertEqual(result["excluded_lines"], lock)
+        gates = {g["id"]: g for g in result["gates"]}
+        self.assertIn("size", gates)
+        self.assertIn("origin not confirmed", gates["provenance"]["reason"])  # QQ is told why nothing was applied
+        # only the boolean True counts: other truthy values do not attest anything
+        for name, value in {"False": False, "None": None, "string": "yes", "one": 1, "dict": {"confirmed": True}}.items():
+            with self.subTest(name):
+                result = triage(self.sz_pr(files), dict(POLICY, size_exceptions=record, size_exceptions_trusted_source=value))
+                self.assertIn("origin not confirmed", result["size_exception"])
+                self.assertEqual(result["excluded_lines"], lock)
+        # attested by the controlled entry: applied
+        self.assertTrue(self.sz_run(files, exceptions=record)[0]["size_exception"].startswith("applied"))
+        # nothing the PR carries can supply a record: description, files in the PR, extra fields on the PR object
+        injected = json.dumps({self.SZ_KEY: record[self.SZ_KEY]})
+        pr = self.sz_pr(files + [{"path": "size_exceptions.json", "additions": 1, "deletions": 0},
+                                 {"path": ".gitattributes", "additions": 1, "deletions": 0}], body=injected + "\npytest test/x.py passed")
+        pr["changedFiles"] = len(pr["files"])
+        pr.update(size_exceptions=record, review=record[self.SZ_KEY]["review"], groups=record[self.SZ_KEY]["groups"])
+        result = triage(pr, dict(POLICY, size_exceptions_trusted_source=True))  # attested, but no record in policy
+        self.assertIsNone(result["size_exception"])
+        self.assertEqual(result["excluded_lines"], lock)
+        self.assertIn("size", {g["id"]: g for g in result["gates"]})
+
+    def test_incomplete_file_list_counts_everything(self):
+        # gh caps the file list at 100: more files than it returned => nothing is excluded, not even a lockfile
+        files = self.SZ_VEND[:1] + self.SZ_LOCK + self.SZ_HAND
+        for name, extra in {"paginated: 250 files, 4 returned": {"changedFiles": 250}, "query failed: no files returned": {"changedFiles": 5, "drop_files": True}}.items():
+            with self.subTest(name):
+                result, gates = self.sz_run(files, exceptions=self.sz_exception(), **extra)
+                self.assertEqual(result["excluded_lines"], 0)
+                self.assertIn("file list is incomplete", gates["provenance"]["reason"])
+                self.assertIn("file list incomplete, all lines counted", gates["provenance"]["reason"])
+                self.assertIn("no file is excluded", gates["provenance"]["reason"])  # a lockfile cannot be told apart either
+                self.assertNotIn("only the defined lockfile exclusion stays", gates["provenance"]["reason"])
+        # a PR that genuinely changes no files has nothing to check
+        none = self.sz_pr([])
+        none["changedFiles"] = 0
+        self.assertNotIn("provenance", {g["id"]: g for g in triage(none, POLICY)["gates"]})
+
+    def test_provenance_gate_is_for_a_maintainer_not_a_bounce_to_the_author(self):
+        gates = triage(self.sz_pr(self.SZ_LOCK), POLICY)["gates"]
+        self.assertEqual([g["kind"] for g in gates if g["id"] == "provenance"], ["human"])
+        self.assertFalse([g for g in gates if g["kind"] == "author"])  # nothing here bounces the PR to needs_author
+        plain = triage(self.sz_pr([{"path": "scripts/clip.py", "additions": 10, "deletions": 1}]), POLICY)["gates"]
+        self.assertNotIn("provenance", [g["id"] for g in plain])
 
     def test_ai_signal(self):
         pr = snapshot(body="pytest ok\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)")

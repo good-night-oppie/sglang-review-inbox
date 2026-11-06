@@ -152,6 +152,12 @@ DEFAULTS = {
         "github_prefix": "[{login} Review Agent] ",
         # Readiness gates applied before any agent time is spent.
         "max_changed_lines": 2500,
+        # Proposal under review, not an approved storage design: QQ's accepted size-exception records, keyed
+        # "owner/repo#N". Empty by default. See triage.size_exception for the record shape and for every case
+        # that falls back to counting all lines. No path globs and no .gitattributes.
+        "size_exceptions": {},
+        # Fail closed: the records above are ignored unless the controlled review-record entry sets this to True.
+        "size_exceptions_trusted_source": False,
         "require_test_plan": True,
         "require_perf_numbers": True,
         # PR text matching these never gets agent output posted anywhere.

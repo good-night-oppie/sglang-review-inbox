@@ -8,6 +8,7 @@ import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -2447,3 +2448,24 @@ class RunTreeTimeoutTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TailnetHostTest(unittest.TestCase):
+    """The dashboard answers on the tailnet name only for listed tailnet users."""
+
+    def ok(self, headers, tailnet):
+        import server
+        h = server.Handler.__new__(server.Handler)
+        h.headers = headers
+        h.server = SimpleNamespace(tailnet=tailnet)
+        return h._host_ok()
+
+    def test_rules(self):
+        tn = {"host": "box.tail1.ts.net", "logins": {"me@example.com"}}
+        self.assertTrue(self.ok({"Host": "127.0.0.1:8775"}, None))
+        self.assertTrue(self.ok({"Host": "box.tail1.ts.net", "Tailscale-User-Login": "Me@Example.com"}, tn))
+        self.assertFalse(self.ok({"Host": "box.tail1.ts.net"}, tn))  # tagged device: no login header
+        self.assertFalse(self.ok({"Host": "box.tail1.ts.net", "Tailscale-User-Login": "other@example.com"}, tn))
+        self.assertFalse(self.ok({"Host": "evil.example", "Tailscale-User-Login": "me@example.com"}, tn))
+        self.assertFalse(self.ok({"Host": "box.tail1.ts.net", "Tailscale-User-Login": "me@example.com"}, None))
+

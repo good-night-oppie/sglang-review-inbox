@@ -5,7 +5,8 @@
 
 Binds to 127.0.0.1 only. Every POST needs the per-process token embedded in
 the page, and the Host header must be local, so other web pages cannot
-drive approvals through your browser."""
+drive approvals through your browser. Optional server.tailnet {host, logins}
+also admits requests relayed by `tailscale serve` for the listed tailnet users."""
 
 import argparse
 import json
@@ -84,8 +85,16 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _host_ok(self):
-        host = (self.headers.get("Host") or "").split(":")[0]
-        return host in ("127.0.0.1", "localhost")
+        host = (self.headers.get("Host") or "").split(":")[0].lower()
+        if host in ("127.0.0.1", "localhost"):
+            return True
+        # Phone access through `tailscale serve` (tailnet only, never Funnel): the
+        # request still arrives on 127.0.0.1, with the machine's ts.net name as Host
+        # and the tailnet user that Tailscale itself vouches for. Tagged devices and
+        # anyone not listed get nothing.
+        tailnet = getattr(self.server, "tailnet", None) or {}
+        login = (self.headers.get("Tailscale-User-Login") or "").lower()
+        return bool(tailnet) and host == tailnet["host"] and login in tailnet["logins"]
 
     def do_GET(self):
         if not self._host_ok():
@@ -309,6 +318,9 @@ def main():
         pipeline.start()
     server = ThreadingHTTPServer((config["server"]["host"], config["server"]["port"]), Handler)
     server.app = {"store": store, "pipeline": pipeline}
+    tailnet = config["server"].get("tailnet") or {}
+    server.tailnet = {"host": tailnet["host"].lower().rstrip("."),
+                      "logins": {x.lower() for x in tailnet["logins"]}} if tailnet.get("logins") else None
     print(f"Review Inbox on http://127.0.0.1:{config['server']['port']}  mode={config['mode']}"
           f"  runner={config['agent']['runner']}", flush=True)
     try:

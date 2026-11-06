@@ -33,6 +33,7 @@ RISK_PATHS = [
     ("medium", "launcher", "切片助手.bat"),
     ("medium", "launcher", "启动切片助手.vbs"),
     ("low", "tests", "tests/"),
+    ("low", "tests", "test/"),  # MontClip / MontClip-Cindy keep their tests under test/
     ("low", "docs", "reference/"),
     ("low", "experiments", "experiments/"),
 ]
@@ -52,7 +53,9 @@ AI_MARKERS = [
     (re.compile(r"🤖"), "🤖 marker"),
 ]
 TEST_EVIDENCE = re.compile(
-    r"unittest|Ran \d+ tests?|OK \(|OK\b|ruff|test_\w+\.py|python3? -[BI]|没跑|passed|```", re.I)
+    r"unittest|Ran \d+ tests?|OK \(|OK\b|ruff|test_\w+\.py|python3? -[BI]|没跑|passed|```"
+    # MontClip / MontClip-Cindy (Node): 「共 N，通过 N，失败 N」 and the npm / node --test commands
+    r"|共\s*\d+\s*[，,]\s*通过\s*\d+\s*[，,]\s*失败\s*\d+|npm (run )?test|node --test", re.I)
 PERF_TITLE = re.compile(r"\[perf\]|speed ?up|optimi[sz]|faster|latency|throughput|提速|更快", re.I)
 PERF_NUMBERS = re.compile(r"\d[\d.,]*\s*(ms|s\b|秒|x\b|×|%|倍)", re.I)
 
@@ -89,7 +92,7 @@ def triage(pr, policy, requested_by_human=False):
             level = file_level
     body = pr.get("body") or ""
     title = pr.get("title") or ""
-    touches_tests = any(path.startswith("tests/") for path in paths)
+    touches_tests = any(path.startswith(("tests/", "test/")) for path in paths)
     touches_export = any(path in EXPORT_PATHS for path in paths)
 
     # (id, kind, reason shown on the dashboard, what to ask the author; "" = don't ask)
@@ -109,7 +112,7 @@ def triage(pr, policy, requested_by_human=False):
         gates.append(("cleanroom", "human", "touches or cites reference/capcut-investigation/ (clean-room rule)", ""))
     if policy["require_test_plan"] and level != "low" and not touches_tests and not TEST_EVIDENCE.search(body):
         gates.append(("tests", "author", "no test commands or results in the description",
-                      "add the unittest / ruff commands and their numbers for the current head to the description"))
+                      "add the test commands (unittest / ruff, or npm test / node --test) and their numbers for the current head to the description"))
     if touches_export and not SYNC_EVIDENCE.search(body):
         gates.append(("avsync", "author", "export code changed but no A/V sync readings in the description",
                       "run the synthetic flash + beep sync check and add the per-seam readings (<= 40 ms) for FLV and MP4"))

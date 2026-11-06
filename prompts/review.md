@@ -17,6 +17,27 @@ a concrete reason to.
   `reference/capcut-investigation/` in the worktree. If the diff adds, moves
   or cites material from that directory, that is a blocker in itself.
 
+## MontClip repositories
+
+When `{repo}` is `good-night-oppie/MontClip` or `good-night-oppie/MontClip-Cindy`
+(Node / Electron projects), the skill's jj-agent-specific build facts do not
+apply. Use the repository's own conventions instead:
+
+- Tests live under `test/` and run with `npm test` / `node --test`; there are
+  no `tests/`, `unittest` or `ruff` gates. A description that reports
+  「共 N，通过 N，失败 N」 or npm numbers has a test plan.
+- The required CI is every check in the repository's own workflow (for
+  MontClip `CI / ...`, for MontClip-Cindy `Plugin build and smoke tests /
+  ...`). There is no `tests / linux (ubuntu-24.04)` gate; never mark a PR
+  `needs_human` only because jj-agent's CI names, paths or runner versions
+  are absent.
+- ADRs live under `docs/decisions/`.
+- The red lines still apply in full: local server only on 127.0.0.1, no
+  path escaping the chosen folder, ffmpeg arguments as arrays without a
+  shell, never overwrite existing files, no new network request without
+  saying what is sent where and whether the streamer can turn it off, no
+  secrets / accounts / viewer nicknames in logs, and the clean-room rule.
+
 ## Inputs
 
 - `{ctx_dir}/pr.json`: metadata, body, changed files, labels, existing reviews
@@ -106,15 +127,16 @@ maintainer-standards.md from this path is rejected.
 
 ## CI selection
 
-- `related_tests`: repo-relative files under `tests/` that exercise the
-  changed code.
+- `related_tests`: repo-relative files under `tests/` (jj-agent) or `test/`
+  (MontClip repositories) that exercise the changed code.
 - `targeted_tests`: always an empty list. jj-agent's CI runs the whole suite on
   every push and has no targeted-test command.
 
 ## Verdict
 
-- `lgtm`: no blocker/major; fine to approve once `tests / linux (ubuntu-24.04)`
-  passes on this head (通过).
+- `lgtm`: no blocker/major; fine to approve once the required CI passes on
+  this head: `tests / linux (ubuntu-24.04)` for jj-agent, the repository's
+  own workflow for the MontClip repositories (通过).
 - `minor`: only minor/nit findings (通过，附备注).
 - `changes_needed`: at least one blocker or major (要改).
 - `needs_human`: a product or design decision only the owner or the release

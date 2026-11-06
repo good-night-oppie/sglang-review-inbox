@@ -61,6 +61,22 @@ class TriageTest(unittest.TestCase):
         self.assertIn("no test commands", reasons)
         self.assertIn("before/after", reasons)
 
+    def test_montclip_npm_results_count_as_test_evidence(self):
+        # MontClip PR bodies report npm results in Chinese; that is a test plan, not a missing one
+        files = [{"path": "app.js", "additions": 40, "deletions": 3}]
+        for body in ("Windows（本机，head 13687bc）：共 1550，通过 1545，失败 0，跳过 5",
+                     "共 30, 通过 30, 失败 0", "跑了 npm test", "node --test test/a.test.js"):
+            reasons = " ".join(g["reason"] for g in triage(snapshot(files=files, body=body), POLICY)["gates"])
+            self.assertNotIn("no test commands", reasons, body)
+        reasons = " ".join(g["reason"] for g in triage(snapshot(files=files, body="fix the export"), POLICY)["gates"])
+        self.assertIn("no test commands", reasons)
+
+    def test_montclip_test_dir_counts_as_touching_tests(self):
+        files = [{"path": "app.js", "additions": 40, "deletions": 3},
+                 {"path": "test/export-frame-zh.test.js", "additions": 33, "deletions": 0}]
+        reasons = " ".join(g["reason"] for g in triage(snapshot(files=files, body="fix the export"), POLICY)["gates"])
+        self.assertNotIn("no test commands", reasons)
+
     def test_ai_signal(self):
         pr = snapshot(body="pytest ok\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)")
         self.assertIn("Claude Code", triage(pr, POLICY)["ai_signals"])

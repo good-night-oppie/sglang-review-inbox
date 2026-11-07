@@ -789,6 +789,28 @@ class PipelineTest(unittest.TestCase):
         self.store.update_pr(self.key, refreshed_at=time.time() - 3600)
         self.assertTrue(self.pipe.refresh_due(self.store.get_pr(self.key)))  # never parked on you
 
+    def test_pr_merged_while_job_waits_is_not_reviewed_and_closes(self):
+        self.addCleanup(self.store.conn.close)
+        self.pipe.submit = Pipeline.submit.__get__(self.pipe)  # real wrapper
+        waiting = []
+
+        class QueueExecutor:
+            def submit(self, fn, *args):
+                waiting.append(fn)
+
+        self.pipe.executor = QueueExecutor()
+        card = self.advance()  # review job queued behind busy workers
+        self.assertEqual(card["stage"], "queued")
+        self.assertIn(self.key, self.pipe.inflight)
+        self.snap = snapshot(state="MERGED")  # merged on GitHub while it waits
+        with mock.patch.object(agent, "review", side_effect=AssertionError("must not review a merged PR")):
+            waiting.pop()()
+        self.assertNotIn(self.key, self.pipe.inflight)
+        card = self.store.get_pr(self.key)
+        self.assertTrue(card["decision"]["refresh"])
+        self.assertTrue(self.pipe.refresh_due(card))
+        self.assertEqual(self.advance()["stage"], "closed")
+
     def test_spend_cap_is_one_status_not_a_wall_of_errors(self):
         self.pipe.submit = Pipeline.submit.__get__(self.pipe)
         self.pipe.executor = SyncExecutor()

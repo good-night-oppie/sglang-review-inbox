@@ -1606,6 +1606,9 @@ class Pipeline:
         def wrapped():
             decision = {}
             try:
+                if fn.__name__ in self.AGENT_JOBS and self.closed_before_start(key):
+                    decision = {"refresh": True}
+                    return
                 fn(*args)
                 decision = {"refresh": True, "error_count": 0}
                 self.status.pop("agent_blocked", None)
@@ -1622,6 +1625,23 @@ class Pipeline:
                 self.wake.set()
 
         self.executor.submit(wrapped)
+
+    def closed_before_start(self, key):
+        """A job can wait behind max_concurrent for a long time, and tick() does not
+        refresh a card while its key is in inflight. Check the PR is still open
+        right before an agent job starts, so a PR merged or closed meanwhile is not
+        reviewed for nothing; the refresh this triggers closes the card."""
+        card = self.store.get_pr(key)
+        if card is None:
+            return False
+        try:
+            state = github.fetch_pr(card["repo"], card["number"]).get("state")
+        except Exception:  # can't tell: run the job as before
+            return False
+        if state == "OPEN":
+            return False
+        self.store.add_event(key, "skip", f"PR is {str(state).lower()} before the agent job started; job skipped")
+        return True
 
     def agent_blocked(self, exc):
         """An account-level stop (usage limit / spend cap on every codex

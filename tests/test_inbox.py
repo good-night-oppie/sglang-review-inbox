@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import re
@@ -639,10 +640,15 @@ class AgentProfileTest(unittest.TestCase):
 class PipelineTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         self.config = config_module.load(None)
         self.config.update(data_dir=self.tmp.name, notify_macos=False)
         self.config["agent"]["review_skill"]["repo"] = ""  # no network in tests
         self.store = Store(Path(self.tmp.name) / "t.sqlite3")
+        self.addCleanup(self.store.conn.close)
+        usage = mock.patch.object(agent, "usage_hook", None)
+        usage.start()
+        self.addCleanup(usage.stop)
         self.pipe = Pipeline(self.config, self.store)
         self.pipe.submit = lambda key, fn, *args: fn(*args)  # run jobs inline
         self.snap = snapshot()
@@ -662,7 +668,6 @@ class PipelineTest(unittest.TestCase):
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
-        self.addCleanup(self.tmp.cleanup)
         self.store.ensure_pr("sgl-project/sglang", 7, requester={
             "id": "slack:C1:1", "source": "slack", "author": "alice", "ts": 1})
         self.key = "sgl-project/sglang#7"
@@ -673,6 +678,8 @@ class PipelineTest(unittest.TestCase):
 
     def fake_review(self, repo, number, commit_id, event, body, comments=()):
         self.writes.append((event, commit_id, body, list(comments)))
+        if event == "APPROVE":  # Explicit human API approval is now visible on GitHub.
+            self.approved.add(commit_id)
         return {"id": 1, "url": "https://github.com/r/1"}
 
     def fake_agent_review(self, config, workspace, tier, *args):
@@ -844,7 +851,11 @@ class AutonomousTest(unittest.TestCase):
         self.config["policy"].update(auto_approve=True, auto_publish_findings=True, auto_author_notes=True,
                                      slack_ack=True, slack_report=True)
         self.store = Store(Path(self.tmp.name) / "t.sqlite3")
+        self.addCleanup(self.store.conn.close)
         self.store.set_kv("mode", "live")
+        usage = mock.patch.object(agent, "usage_hook", None)
+        usage.start()
+        self.addCleanup(usage.stop)
         self.pipe = Pipeline(self.config, self.store)
         self.pipe.submit = lambda key, fn, *args: fn(*args)
         self.slack = FakeSlack()
@@ -886,8 +897,12 @@ class AutonomousTest(unittest.TestCase):
             "channel_id": "C1", "thread_ts": "1.0", "lang": "en", "ts": 1})
         self.key = "sgl-project/sglang#7"
 
+
+
     def fake_review(self, repo, number, commit_id, event, body, comments=()):
         self.writes.append((event, commit_id, body, list(comments)))
+        if event == "APPROVE":  # Explicit human API approval is now visible on GitHub.
+            self.approved.add(commit_id)
         return {"id": 1, "url": "https://github.com/r/1"}
 
     def fake_agent_review(self, config, workspace, tier, *args):
@@ -899,16 +914,14 @@ class AutonomousTest(unittest.TestCase):
         self.pipe.advance(self.store.get_pr(self.key))
         return self.store.get_pr(self.key)
 
-    def test_green_pr_is_approved_and_reported_but_never_merged(self):
+    def test_green_pr_comments_then_waits_for_formal_approval(self):
         self.advance()  # review
-        card = self.advance()  # CI green → auto approve
-        self.assertEqual(card["stage"], "approved")
-        self.assertEqual([w[0] for w in self.writes], ["APPROVE"])
+        card = self.advance()  # Advisory only; no formal approval
+        self.assertEqual(card["stage"], "ready")
+        self.assertEqual([w[0] for w in self.writes], ["COMMENT"])
         self.assertEqual(self.writes[0][1], HEAD)
-        # one short line, only once the PR has an outcome; no ack, no @
-        self.assertEqual([text for _, _, text in self.slack.sent], [
-            "[BBuf Review Agent] Approved <https://github.com/sgl-project/sglang/pull/7|sglang#7>, "
-            "will merge once CI is green."])
+        self.assertEqual(self.slack.sent, [])  # Advisory is never announced as Approved.
+        self.approved.add(HEAD)  # QQ now posts a formal current-head approval on GitHub.
         self.snap = dict(self.snap, reviewDecision="APPROVED")
         card = self.advance()
         self.assertTrue(card["decision"]["merge_ready"])
@@ -918,6 +931,7 @@ class AutonomousTest(unittest.TestCase):
         self.pipe.merge(self.key)
         self.assertIn(("merge",), self.writes)
         self.assertEqual(self.store.agent_merged_keys(), set())  # your click is not an agent auto-merge
+
 
     def failing_ci(self, classification, evidence="", completed="2026-10-30T01:00:00Z"):
         failing = dict(check("gpu-test", conclusion="FAILURE"), completedAt=completed)
@@ -971,6 +985,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertIsNone(self.pipe.translating)
 
     def test_auto_merge_merges_and_tells_the_slack_thread(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         self.config["policy"]["auto_merge"] = True
         self.advance()  # review
         self.advance()  # approve; GitHub still shows REVIEW_REQUIRED, so not mergeable yet
@@ -985,7 +1000,9 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(self.store.count_events("merge", 0), 1)
         self.assertEqual(self.store.agent_merged_keys(), {self.key})  # shown in violet under Merged
 
+
     def test_auto_merge_respects_hold_markers(self):
+        self.approved.add(HEAD)  # Explicit formal GitHub approval, not a model verdict.
         self.config["policy"]["auto_merge"] = True
         self.snap = snapshot(labels=["run-ci", "do-not-merge"], rollup=[check("unit")])
         self.advance()
@@ -996,12 +1013,14 @@ class AutonomousTest(unittest.TestCase):
         self.assertTrue(card["decision"]["merge_ready"])  # left on Ready to merge for you
         self.assertIn("do-not-merge", card["stage_reason"])
 
+
     def add_event_ago(self, kind, message, seconds, key="sgl-project/sglang#1"):
         self.store.add_event(key, kind, message)
         self.store.conn.execute("UPDATE events SET ts = ts - ? WHERE id = (SELECT MAX(id) FROM events)", (seconds,))
         self.store.conn.commit()
 
     def test_auto_merges_are_spaced_out(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         self.config["policy"]["auto_merge"] = True
         self.add_event_ago("merge", "you merged aaaaaaaa", 60)  # your own merge does not hold the agent back
         self.add_event_ago("merge", "agent merged bbbbbbbb", 20 * 60)
@@ -1019,7 +1038,9 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(self.writes.count(("merge",)), 1)
         self.assertEqual(card["stage_reason"], "merged")
 
+
     def test_daily_auto_merge_cap_counts_only_agent_merges(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         self.config["policy"].update(auto_merge=True, max_auto_merges_per_day=2)
         for hours in (3, 5):
             self.add_event_ago("merge", "agent merged cccccccc", hours * 3600)
@@ -1031,7 +1052,9 @@ class AutonomousTest(unittest.TestCase):
         self.assertNotIn(("merge",), self.writes)
         self.assertIn("daily auto-merge budget used", card["stage_reason"])
 
+
     def test_failed_auto_merge_backs_off_and_stays_ready(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         self.config["policy"]["auto_merge"] = True
         self.advance()
         self.advance()
@@ -1066,7 +1089,9 @@ class AutonomousTest(unittest.TestCase):
             self.assertEqual(card["stage"], "ready")
         self.assertEqual([t for _, _, t in self.slack.sent if "Merged" in t], [])
 
+
     def test_no_slack_reply_into_a_workspace_that_is_no_longer_connected(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         self.config["policy"]["auto_merge"] = True
         self.pipe.slack_teams = lambda: {"T-OTHER"}
         self.advance()
@@ -1076,7 +1101,9 @@ class AutonomousTest(unittest.TestCase):
         self.assertIn(("merge",), self.writes)
         self.assertEqual(self.slack.sent, [])
 
+
     def test_merge_blocked_by_unlinked_commit_goes_to_the_author(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         self.config["policy"]["auto_merge"] = True
         self.advance()
         self.advance()
@@ -1103,13 +1130,16 @@ class AutonomousTest(unittest.TestCase):
             card["decision"]["merge_failure"], at=0)))
         self.assertEqual(self.advance()["stage"], "closed")
 
+
     def test_draft_is_reviewed_when_someone_asks_in_slack(self):
         self.snap = snapshot(labels=["run-ci"], rollup=[check("unit")], draft=True)
         self.advance()
         card = self.advance()
         self.assertEqual(card["review_head"], HEAD)  # reviewed despite the draft
-        self.assertEqual(self.writes[0][0], "APPROVE")
-        self.assertIn("Approved", self.slack.sent[-1][2])
+        self.assertEqual(self.writes[0][0], "COMMENT")
+        self.assertEqual(card["stage"], "ready")
+        self.assertEqual(self.slack.sent, [])
+
 
     def test_your_own_merge_closes_the_slack_ask_once_for_all_its_prs(self):
         self.store.add_mention({"id": "slack:T1:C1:1.0", "source": "slack", "team_id": "T1", "channel_id": "C1",
@@ -1142,7 +1172,9 @@ class AutonomousTest(unittest.TestCase):
         self.store.update_pr(self.key, requesters=card["requesters"] + [second])
         self.advance()
         self.advance()
-        self.assertEqual(sum("Approved" in text for _, _, text in self.slack.sent), 1)
+        self.assertEqual(sum(w[0] == "COMMENT" for w in self.writes), 1)
+        self.assertFalse(any("Approved" in text for _, _, text in self.slack.sent))
+
 
     def test_merge_made_elsewhere_is_not_announced(self):
         self.advance()
@@ -1152,14 +1184,16 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(card["stage"], "closed")
         self.assertEqual([t for _, _, t in self.slack.sent if "Merged" in t], [])
 
-    def test_approval_is_announced_once_per_pr_not_per_head(self):
+    def test_advisory_is_once_per_head_and_never_announced_as_approval(self):
         self.advance()
-        self.advance()  # approved head 1
+        self.advance()  # advisory head 1
         self.snap = snapshot(head=NEW_HEAD, labels=["run-ci"], rollup=[check("unit")])
         self.advance()  # e.g. an agent fix pushed a new head: review again
-        self.advance()  # approved head 2
-        self.assertEqual(sum(w[0] == "APPROVE" for w in self.writes), 2)
-        self.assertEqual(sum("Approved" in text for _, _, text in self.slack.sent), 1)
+        self.advance()  # advisory head 2
+        self.assertEqual(sum(w[0] == "COMMENT" for w in self.writes), 2)
+        self.assertNotIn("APPROVE", [w[0] for w in self.writes])
+        self.assertFalse(any("Approved" in text for _, _, text in self.slack.sent))
+
 
     @unittest.skip("jj-agent overlay: SGLang CI slash commands (/tag-and-rerun-ci, /rerun-test), run-ci label and hardware lanes do not exist in jj-agent; see tests/test_jj_agent_adapter.py")
     def test_infra_failure_is_retried_then_noted_not_parked(self):
@@ -1187,6 +1221,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(len(self.slack.sent), 1)  # only the approval; retries stay off Slack
 
     def test_unattributed_failure_gets_one_rerun_then_the_author(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         triage = self.failing_ci("unknown", "Segmentation fault")
         with mock.patch.object(agent, "triage_ci", return_value=(triage, {})), \
                 mock.patch.object(github, "failed_job_log", return_value="..."):
@@ -1204,10 +1239,12 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(card["stage"], "needs_author")
         notes = self.comments()[1:]
         self.assertEqual(len(notes), 1)
-        self.assertTrue(notes[0].startswith("[BBuf Review Agent] @someone these still fail after a rerun"))
+        self.assertTrue(notes[0].startswith(github.agent_review_body(HEAD, "[BBuf Review Agent] @someone these still fail after a rerun")))
         self.assertIn("Segmentation fault", notes[0])
 
+
     def test_failure_without_a_readable_log_is_rerun_then_watched_never_pinged(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         triage = self.failing_ci("unknown", "(not fetched: over the 20-log cap) No failure log is available.")
         with mock.patch.object(agent, "triage_ci", return_value=(triage, {})), \
                 mock.patch.object(github, "failed_job_log", return_value="..."):
@@ -1229,7 +1266,9 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(card["stage"], "approved")
         self.assertIn("without a readable log; the agent keeps watching", card["stage_reason"])
 
+
     def test_quoted_log_fetch_failure_is_never_quoted_to_the_author(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         missing = "(log fetch failed: gh run view --repo: log not found: 124328582203)"
         triage = self.failing_ci("unknown", f'"{missing}"')
         with mock.patch.object(agent, "triage_ci", return_value=(triage, {})), \
@@ -1242,7 +1281,9 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(self.comments(), ["/rerun-failed-ci"])  # no @author note quoting the fetch error
         self.assertIn("without a readable log, agent rerunning", card["stage_reason"])
 
+
     def test_related_call_on_a_job_without_a_log_is_not_sent_to_the_author(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         triage = self.failing_ci("related", "AITER decode path changed, so this AMD job likely regressed")
         missing = "(log fetch failed: gh run view --repo: log not found: 1)"
         with mock.patch.object(agent, "triage_ci", return_value=(triage, {})), \
@@ -1259,6 +1300,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(card["stage"], "approved")
         self.assertEqual(self.slack.sent[-1][2].count("CI failures"), 0)
 
+
     def test_triage_reads_every_matrix_leg(self):
         legs = [dict(check(f"cpu ({i})", conclusion="FAILURE")) for i in range(3)]
         self.snap = snapshot(labels=["run-ci"], rollup=[check("unit")] + legs)
@@ -1271,6 +1313,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(len(fetched), 3)
 
     def test_related_failure_pings_the_author_with_the_error(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         triage = self.failing_ci("related", "AssertionError: expected 3 got 4")
         with mock.patch.object(agent, "triage_ci", return_value=(triage, {})), \
                 mock.patch.object(github, "failed_job_log", return_value="..."):
@@ -1284,6 +1327,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertIn("AssertionError: expected 3 got 4", self.comments()[0])
         self.assertIn("CI failures look related to the change", self.slack.sent[-1][2])
 
+
     @unittest.skip("jj-agent overlay: SGLang CI slash commands (/tag-and-rerun-ci, /rerun-test), run-ci label and hardware lanes do not exist in jj-agent; see tests/test_jj_agent_adapter.py")
     def test_held_fork_runs_are_approved_on_needed_lanes_only(self):
         self.snap = snapshot(labels=["run-ci"], rollup=[check("unit", status="IN_PROGRESS", conclusion="")])
@@ -1295,6 +1339,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual([w for w in self.writes if w[0] == "approve-run"], [("approve-run", 11)])
 
     def test_held_runs_of_a_workflow_change_are_left_to_you(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         files = [{"path": ".github/workflows/pr-test.yml", "additions": 3, "deletions": 1},
                  {"path": "python/sglang/srt/managers/scheduler.py", "additions": 3, "deletions": 1}]
         self.snap = snapshot(labels=["run-ci"], files=files)
@@ -1303,6 +1348,7 @@ class AutonomousTest(unittest.TestCase):
         card = self.advance()
         self.assertEqual((card["stage"], card["decision"]["ready_kind"]), ("ready", "ci"))
         self.assertNotIn("approve-run", [w[0] for w in self.writes])
+
 
     def test_approval_budget_waits_in_the_agent_queue(self):
         self.config["policy"]["max_auto_approvals_per_day"] = 0
@@ -1344,7 +1390,10 @@ class AutonomousTest(unittest.TestCase):
         event, _, body, inline = self.writes[0]
         self.assertEqual((event, inline), ("COMMENT", []))  # the inline P1 is not repeated
         self.assertIn("Still open from my last review:\n- Prove the fused path runs (`a.py:3`)", body)
-        self.assertTrue(body.startswith("[BBuf Review Agent] One thing to fix before this can go in."))
+        self.assertEqual(body.splitlines()[0], github.AGENT_REVIEW_NOTICE)
+        self.assertIn(HEAD, body)
+        self.assertIn("One thing to fix before this can go in.", body)
+
 
     def blocker(self):
         self.verdict = "changes_needed"
@@ -1365,7 +1414,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(card["stage"], "queued")
         self.assertNotIn("COMMENT", [w[0] for w in self.writes])  # no findings review: fixed instead
         note = self.comments()[-1]
-        self.assertTrue(note.startswith("[BBuf Review Agent] @someone I pushed `ffffffff` to your branch: Guard the empty batch. Please pull before pushing again."))
+        self.assertTrue(note.startswith(github.agent_review_body(HEAD, "[BBuf Review Agent] @someone I pushed `ffffffff` to your branch: Guard the empty batch. Please pull before pushing again.")))
         self.advance()
         self.assertEqual(len(runs), 1)  # one attempt per head
 
@@ -1397,13 +1446,15 @@ class AutonomousTest(unittest.TestCase):
             card = self.advance()
             self.advance()
         self.assertEqual(len(calls), 1)  # answered once
-        self.assertEqual([w for w in self.writes if w[0] == "reply"], [("reply", 1, "[BBuf Review Agent] " + reply)])
+        self.assertEqual([w for w in self.writes if w[0] == "reply"], [("reply", 1, github.agent_review_body(HEAD, "[BBuf Review Agent] " + reply))])
         return card
 
-    def test_author_is_right_so_the_finding_is_dropped_and_approved(self):
+    def test_author_is_right_so_the_finding_is_dropped_and_commented(self):
         card = self.author_replies("concede")
         self.assertEqual(card["decision"]["waived_findings"], ["Empty batch crashes"])
-        self.assertIn("APPROVE", [w[0] for w in self.writes])
+        self.assertNotIn("APPROVE", [w[0] for w in self.writes])
+        self.assertTrue(any(a["event"] == "review:agent-comment" for a in self.store.actions(self.key)))
+
 
     def test_finding_that_still_holds_is_explained_once(self):
         card = self.author_replies("hold", "It still needs the empty-batch guard at a.py:3.")
@@ -1425,7 +1476,8 @@ class AutonomousTest(unittest.TestCase):
         self.advance()
         card = self.advance()
         self.assertEqual(card["review"]["verdict"], "minor")
-        self.assertEqual([w[0] for w in self.writes if w[0] in ("APPROVE", "COMMENT")], ["APPROVE"])  # nothing posted
+        self.assertEqual([w[0] for w in self.writes if w[0] in ("APPROVE", "COMMENT")], ["COMMENT"])  # nothing posted
+
 
     def test_a_repeated_evidence_request_is_dropped(self):
         self.findings = [{"severity": "minor", "category": "x", "kind": "evidence", "path": "a.py", "line": 3,
@@ -1465,12 +1517,17 @@ class AutonomousTest(unittest.TestCase):
     def test_your_ignore_this_drops_the_finding_and_the_pr_moves_on(self):
         card = self.maintainer_says("Yes, just ignore this", "concede")
         self.assertIn("Empty batch crashes", card["decision"]["waived_findings"])
-        self.assertIn("APPROVE", [w[0] for w in self.writes])
+        self.assertNotIn("APPROVE", [w[0] for w in self.writes])
+        self.assertTrue(any(a["event"] == "review:agent-comment" for a in self.store.actions(self.key)))
 
-    def test_your_lgtm_comment_approves(self):
+
+    def test_model_interpretation_of_your_lgtm_only_comments(self):
         card = self.maintainer_says("LGTM, the guard is fine", "approve", kind="issue")
-        self.assertIn("APPROVE", [w[0] for w in self.writes])
-        self.assertEqual(card["stage"], "approved")
+        self.assertNotIn("APPROVE", [w[0] for w in self.writes])
+        self.assertTrue(any(a["event"] == "review:agent-comment" for a in self.store.actions(self.key)))
+        self.assertEqual(card["stage"], "needs_author")  # A model-read LGTM cannot clear confirmed risks.
+
+
 
     def test_your_change_request_waits_on_the_author(self):
         card = self.maintainer_says("Please also guard the decode path", "hold")
@@ -1497,6 +1554,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual([w for w in self.writes if w[0] == "reply"], [])
 
     def test_ci_failure_the_author_explains_stops_blocking(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         self.config["policy"]["auto_discuss"] = True
         triage = self.failing_ci("related", "AssertionError")
         with mock.patch.object(agent, "triage_ci", return_value=(triage, {})), \
@@ -1518,6 +1576,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(card["decision"]["ci_waived"], ["gpu-test"])
         self.assertEqual((card["stage"], card["decision"]["merge_ready"]), ("approved", True))
 
+
     def test_replies_are_read_while_the_pr_waits_at_a_gate(self):
         self.config["policy"]["auto_discuss"] = True
         self.snap = snapshot(labels=["run-ci"], body="", title="[Perf] faster thing")  # perf PR without numbers
@@ -1531,7 +1590,7 @@ class AutonomousTest(unittest.TestCase):
                                "reply": "Before/after tok/s on the same GPU and command."}], "summary": ""}
         with mock.patch.object(agent, "discuss", return_value=(answer, {})):
             self.advance()
-        self.assertIn("[BBuf Review Agent] @someone Before/after tok/s on the same GPU and command.", self.comments())
+        self.assertIn(github.agent_review_body(HEAD, "[BBuf Review Agent] @someone Before/after tok/s on the same GPU and command."), self.comments())
 
     def test_your_hand_off_and_the_per_pr_cap_stop_agent_fixes(self):
         self.config["policy"]["auto_fix"] = True
@@ -1777,6 +1836,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertIn("/rerun-failed-ci", self.comments())
 
     def test_failures_rules_cannot_read_wait_for_the_agent_window(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         self.failing_ci("unknown")
         later = self.close_window()
         card = self.store.get_pr(self.key)
@@ -1803,6 +1863,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(card["stage"], "needs_author")
 
+
     def test_agent_fix_waits_for_the_window_instead_of_going_to_the_author(self):
         self.config["policy"]["auto_fix"] = True
         self.blocker()
@@ -1815,6 +1876,7 @@ class AutonomousTest(unittest.TestCase):
         self.assertNotIn("COMMENT", [w[0] for w in self.writes])
 
     def test_agent_resolves_conflicts_on_an_approved_pr(self):
+        self.approved.add(HEAD)  # Formal approval already posted on GitHub, separate from the agent.
         self.config["policy"]["auto_fix"] = True
         self.snap = snapshot(labels=["run-ci"], rollup=[check("unit")], mergeable="CONFLICTING")
         runs = []
@@ -1823,10 +1885,12 @@ class AutonomousTest(unittest.TestCase):
             "fixed": [], "skipped": []}
         self.advance()
         card = self.advance()
-        self.assertEqual(self.writes[0][0], "APPROVE")
+        self.assertNotIn("APPROVE", [w[0] for w in self.writes])
         self.assertEqual(runs, ["conflict"])
         self.assertEqual(card["stage"], "queued")
         self.assertNotIn("rebase onto main", "\n".join(self.comments()))
+
+
 
     def test_head_you_already_approved_is_not_approved_again(self):
         self.approved = {HEAD}
@@ -1904,14 +1968,17 @@ class AutonomousTest(unittest.TestCase):
         self.assertEqual(len(self.comments()), 2)
         self.assertEqual(card["stage"], "approved")
 
-    def test_conflict_does_not_block_review_or_approval(self):
+    def test_conflict_does_not_block_advisory_but_formal_approval_is_separate(self):
         self.snap = snapshot(labels=["run-ci"], mergeable="CONFLICTING")
         self.advance()  # reviewed despite the conflict
         card = self.advance()
-        self.assertEqual(self.writes[0][0], "APPROVE")  # approval is about the code
+        self.assertEqual(self.writes[0][0], "COMMENT")
+        self.assertEqual(card["stage"], "ready")
+        self.approved.add(HEAD)  # Formal human approval precedes merge/CI judgment.
+        card = self.advance()
         notes = [w[1] for w in self.writes if w[0] == "comment"]
         self.assertEqual(len(notes), 1)
-        self.assertTrue(notes[0].startswith("[BBuf Review Agent] Could you rebase this onto the latest main?"))
+        self.assertTrue(notes[0].startswith(github.agent_review_body(HEAD, "[BBuf Review Agent] Could you rebase this onto the latest main?")))
         self.assertEqual((card["stage"], card["stage_reason"]), ("needs_author", "approved; merge conflict with main"))
         self.assertFalse(card["decision"]["merge_ready"])
         self.advance()
@@ -1921,6 +1988,7 @@ class AutonomousTest(unittest.TestCase):
         self.snap = snapshot(head=NEW_HEAD, labels=["run-ci"], draft=True)
         self.assertEqual(self.advance()["stage"], "needs_author")
         self.assertEqual(self.writes, [])  # drafts nobody asked about in Slack are never nagged
+
 
     @unittest.skip("jj-agent overlay: SGLang CI slash commands (/tag-and-rerun-ci, /rerun-test), run-ci label and hardware lanes do not exist in jj-agent; see tests/test_jj_agent_adapter.py")
     def test_gate_bounce_tells_author_once(self):
@@ -1994,48 +2062,50 @@ class CIRulesTest(unittest.TestCase):
 
 class SlackIntakeTest(unittest.TestCase):
     def test_only_review_requests_with_pr_links_become_cards(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(agent, "usage_hook", None):
             config = config_module.load(None)
             config.update(data_dir=tmp, notify_macos=False)
             store = Store(Path(tmp) / "t.sqlite3")
-            pipe = Pipeline(config, store)
-            now = time.time()
-            t = [f"{now - 3600 + i:.6f}" for i in range(6)]
-            old = f"{now - 20 * 86400:.6f}"  # past the 14-day window
-            fake = FakeSlack(matches=[
-                {"ts": t[0], "user": "U2", "username": "alice", "channel": {"id": "C1", "name": "dev"},
-                 "text": "<@U1> could you review <https://github.com/sgl-project/sglang/pull/11|#11>?",
-                 "permalink": "https://x.slack.com/archives/C1/p11"},
-                {"ts": t[1], "user": "U3", "username": "bob", "channel": {"id": "C1", "name": "dev"},
-                 "text": "<@U1> FYI https://github.com/sgl-project/sglang/pull/12 landed",
-                 "permalink": "https://x.slack.com/archives/C1/p12"},
-                {"ts": t[2], "user": "U3", "username": "bob2", "channel": {"id": "C1", "name": "dev"},
-                 "text": "<@U1> 帮忙看下这个", "permalink": f"https://x.slack.com/archives/C1/p13?thread_ts={t[5]}",
-                 "parent": "https://github.com/sgl-project/sglang/pull/13"},
-                {"ts": t[3], "user": "U4", "username": "carol", "channel": {"id": "C2", "name": "random"},
-                 "text": "<@U1> lunch?", "permalink": "https://x.slack.com/archives/C2/p14"},
-                # the parent asks for review, but this reply only says thanks
-                {"ts": t[4], "user": "U5", "username": "erin", "channel": {"id": "C1", "name": "dev"},
-                 "text": "Thanks for the update! cc <@U1>",
-                 "permalink": f"https://x.slack.com/archives/C1/p15?thread_ts={t[5]}"},
-                {"ts": old, "user": "U6", "username": "frank", "channel": {"id": "C1", "name": "dev"},
-                 "text": "<@U1> please review https://github.com/sgl-project/sglang/pull/16",
-                 "permalink": "https://x.slack.com/archives/C1/p16"},
-                {"ts": t[0], "user": "U7", "username": "jira", "bot_id": "B1", "channel": {"id": "C1", "name": "dev"},
-                 "text": "", "permalink": "https://x.slack.com/archives/C1/p17"},
-            ])
-            fake.parents = {t[5]: "please review https://github.com/sgl-project/sglang/pull/13"}
-            pipe.slack_clients = lambda: [fake]
-            pipe.poll_slack(config["sources"]["slack"])
-            self.assertEqual(sorted(c["number"] for c in store.list_prs()), [11, 13])
-            kinds = {m["author"]: m["kind"] for m in store.recent_mentions(since=0)}
-            self.assertEqual(kinds, {"alice": "review", "bob": "fyi", "bob2": "review", "carol": "other",
-                                     "erin": "pr-other", "frank": "review-old"})
-            card13 = store.get_pr("sgl-project/sglang#13")
-            self.assertEqual(card13["requesters"][0]["thread_ts"], t[5])
-            pipe.poll_slack(config["sources"]["slack"])  # idempotent
-            self.assertEqual(len(store.recent_mentions(since=0)), 6)
-            self.assertEqual(fake.sent, [])  # nothing is posted while ingesting
+            with contextlib.closing(store.conn):
+                pipe = Pipeline(config, store)
+                now = time.time()
+                t = [f"{now - 3600 + i:.6f}" for i in range(6)]
+                old = f"{now - 20 * 86400:.6f}"  # past the 14-day window
+                fake = FakeSlack(matches=[
+                    {"ts": t[0], "user": "U2", "username": "alice", "channel": {"id": "C1", "name": "dev"},
+                     "text": "<@U1> could you review <https://github.com/sgl-project/sglang/pull/11|#11>?",
+                     "permalink": "https://x.slack.com/archives/C1/p11"},
+                    {"ts": t[1], "user": "U3", "username": "bob", "channel": {"id": "C1", "name": "dev"},
+                     "text": "<@U1> FYI https://github.com/sgl-project/sglang/pull/12 landed",
+                     "permalink": "https://x.slack.com/archives/C1/p12"},
+                    {"ts": t[2], "user": "U3", "username": "bob2", "channel": {"id": "C1", "name": "dev"},
+                     "text": "<@U1> 帮忙看下这个", "permalink": f"https://x.slack.com/archives/C1/p13?thread_ts={t[5]}",
+                     "parent": "https://github.com/sgl-project/sglang/pull/13"},
+                    {"ts": t[3], "user": "U4", "username": "carol", "channel": {"id": "C2", "name": "random"},
+                     "text": "<@U1> lunch?", "permalink": "https://x.slack.com/archives/C2/p14"},
+                    # the parent asks for review, but this reply only says thanks
+                    {"ts": t[4], "user": "U5", "username": "erin", "channel": {"id": "C1", "name": "dev"},
+                     "text": "Thanks for the update! cc <@U1>",
+                     "permalink": f"https://x.slack.com/archives/C1/p15?thread_ts={t[5]}"},
+                    {"ts": old, "user": "U6", "username": "frank", "channel": {"id": "C1", "name": "dev"},
+                     "text": "<@U1> please review https://github.com/sgl-project/sglang/pull/16",
+                     "permalink": "https://x.slack.com/archives/C1/p16"},
+                    {"ts": t[0], "user": "U7", "username": "jira", "bot_id": "B1", "channel": {"id": "C1", "name": "dev"},
+                     "text": "", "permalink": "https://x.slack.com/archives/C1/p17"},
+                ])
+                fake.parents = {t[5]: "please review https://github.com/sgl-project/sglang/pull/13"}
+                pipe.slack_clients = lambda: [fake]
+                pipe.poll_slack(config["sources"]["slack"])
+                self.assertEqual(sorted(c["number"] for c in store.list_prs()), [11, 13])
+                kinds = {m["author"]: m["kind"] for m in store.recent_mentions(since=0)}
+                self.assertEqual(kinds, {"alice": "review", "bob": "fyi", "bob2": "review", "carol": "other",
+                                         "erin": "pr-other", "frank": "review-old"})
+                card13 = store.get_pr("sgl-project/sglang#13")
+                self.assertEqual(card13["requesters"][0]["thread_ts"], t[5])
+                pipe.poll_slack(config["sources"]["slack"])  # idempotent
+                self.assertEqual(len(store.recent_mentions(since=0)), 6)
+                self.assertEqual(fake.sent, [])  # nothing is posted while ingesting
+
 
     def test_rerun_test_status_parsing(self):
         # the bot's real format: one line per runner, status emoji inside, `:done` once finished
@@ -2064,6 +2134,10 @@ class SlackInboxTest(unittest.TestCase):
         self.config = config_module.load(None)
         self.config.update(data_dir=self.tmp.name, notify_macos=False)
         self.store = Store(Path(self.tmp.name) / "t.sqlite3")
+        self.addCleanup(self.store.conn.close)
+        usage = mock.patch.object(agent, "usage_hook", None)
+        usage.start()
+        self.addCleanup(usage.stop)
         self.pipe = Pipeline(self.config, self.store)
         now = time.time()
         self.t = [f"{now - 3600 + i:.6f}" for i in range(10)]
@@ -2102,6 +2176,8 @@ class SlackInboxTest(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
         self.pipe.slack_clients = lambda: [self.slack]
+
+
 
     def test_mention_about_a_merged_pr_is_resolved(self):
         self.pipe.poll_slack(self.config["sources"]["slack"])
@@ -2290,13 +2366,13 @@ class CodexAccountTest(unittest.TestCase):
         self.config["agent"]["codex_homes"] = ["/h/personal", "/h/work"]
         agent._resting.clear()
         self.addCleanup(agent._resting.clear)
-        agent._emails.update({"/h/personal": "me@gmail.com", "/h/work": "me@work.ai"})
+        agent._emails.update({str(Path("/h/personal")): "me@gmail.com", str(Path("/h/work")): "me@work.ai"})
 
     def run_with(self, outcomes):
         calls = []
 
         def fake_run(cmd, **kw):
-            home = kw["env"]["CODEX_HOME"]
+            home = Path(kw["env"]["CODEX_HOME"]).as_posix()
             calls.append(home)
             code, err = outcomes[home]
             return subprocess.CompletedProcess(cmd, code, "", err)

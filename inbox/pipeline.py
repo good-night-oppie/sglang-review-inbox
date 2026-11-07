@@ -771,9 +771,11 @@ class Pipeline:
             self.store.set_stage(key, "needs_author", "GitHub review requests changes on this head")
             return
         approved = self.approved_this_head(card, head)
+        card = self.store.get_pr(key)
+        decision = card["decision"]
         if decision.get("approve_head") == head and not approved:
             self.approve(key, note="", by="you, in a GitHub comment")  # you said LGTM on the PR
-            approved = True
+            # A model's interpretation of a comment is advisory, never a formal approval.
         if decision.get("needs_you_head") == head and not approved:
             self.set_ready(card, "look", decision.get("needs_you_reason") or "the author disputes a finding")
             return
@@ -809,7 +811,6 @@ class Pipeline:
                 self.set_ready(card, "look", "needs your look: " + (review.get("verdict_reason") or "high-risk change"))
             elif self.auto_approve_allowed():
                 self.approve(key, by="agent")
-                approved = True
             elif is_live(self.config) and self.policy["auto_approve"]:
                 self.store.set_stage(key, "queued", "no blocking issues; daily approval budget used, "
                                      "approving when it frees up")
@@ -932,9 +933,11 @@ class Pipeline:
             body = plain(answer["reply"])
             try:
                 if reply["kind"] == "review":
-                    url = github.reply_in_thread(card["repo"], card["number"], reply["in_reply_to"], self.sign(body))
+                    url = github.reply_in_thread(card["repo"], card["number"], reply["in_reply_to"],
+                                                 github.agent_review_body(head, self.sign(body)))
                 else:
-                    url = github.comment(card["repo"], card["number"], self.sign(f"@{reply['author']} {body}"))
+                    url = github.comment(card["repo"], card["number"],
+                                         github.agent_review_body(head, self.sign(f"@{reply['author']} {body}")))
             except github.GitHubError as exc:
                 self.store.finish_action(key, head, event, False)
                 self.store.add_event(key, "error", f"answering {reply['author']} failed: {exc}")
@@ -977,14 +980,16 @@ class Pipeline:
                    for review in latest.values())
 
     def approved_this_head(self, card, head):
-        if card["decision"].get("approved_head") == head:
-            return True
-        approved = any(a["event"] == "review:approve" and a["head"] == head and a["phase"] == "done"
-                       for a in self.store.actions(card["key"]))
-        approved = approved or head in github.approved_heads(card["repo"], card["number"], self.login)
+        # Historical actions/cache cannot resurrect an approval QQ dismissed on GitHub.
+        approved = head in github.approved_heads(card["repo"], card["number"], self.login)
+        decision = dict(self.store.get_pr(card["key"])["decision"])
         if approved:
-            self.store.update_pr(card["key"], decision=dict(self.store.get_pr(card["key"])["decision"],
-                                                            approved_head=head))
+            decision["approved_head"] = head
+        else:
+            decision.pop("approved_head", None)
+            decision["merge_ready"] = False
+        if decision != card["decision"]:
+            self.store.update_pr(card["key"], decision=decision)
         return approved
 
     def latest_findings_review(self, key):
@@ -1848,7 +1853,10 @@ class Pipeline:
                 f"- {plain(f['title'])} (`{f['path']}:{f['line']}`)" for f in again)
         body = self.sign(body)
         try:
-            result = github.submit_review(card["repo"], card["number"], head, "COMMENT", body, inline)
+            if by == "human":
+                result = github.submit_review(card["repo"], card["number"], head, "COMMENT", body, inline)
+            else:
+                result = github.submit_agent_review(card["repo"], card["number"], head, body, inline)
         except github.GitHubError:
             self.store.finish_action(key, head, "review:findings", False)
             raise
@@ -1856,7 +1864,36 @@ class Pipeline:
         self.store.add_event(key, "action", f"published {len(wanted)} finding(s)", result)
         return result
 
+    def publish_agent_review(self, key, note=""):
+        """Publish a head-bound advisory once; QQ's formal approval is separate."""
+        card = self.store.get_pr(key)
+        snap = github.fetch_pr(card["repo"], card["number"])
+        head = snap["headRefOid"]
+        if head != card["review_head"] or head != card["head_sha"]:
+            raise ValueError("the head moved; automatic review comment is stale")
+        event = "review:agent-comment"
+        done = next((a for a in self.store.actions(key)
+                     if a["event"] == event and a["head"] == head and a["phase"] == "done"), None)
+        if done:
+            result = done["result"]
+        elif self.store.claim_action(key, head, event):
+            review = card["review"] or {}
+            body = plain(note or review.get("approve_note") or review.get("summary") or "No blocking findings.")
+            try:
+                result = github.submit_agent_review(card["repo"], card["number"], head, body)
+            except github.GitHubError:
+                self.store.finish_action(key, head, event, False)
+                raise
+            self.store.finish_action(key, head, event, True, result)
+            self.store.add_event(key, "agent_comment", f"automatic review comment for {head}", result)
+        else:
+            return None
+        self.set_ready(card, "approve", "automatic review is advisory; waiting for QQ's formal approval")
+        return result
+
     def approve(self, key, note="", by="human"):
+        if by != "human":
+            return self.publish_agent_review(key, note)
         card = self.store.get_pr(key)
         snap = github.fetch_pr(card["repo"], card["number"])
         head = snap["headRefOid"]
@@ -1924,7 +1961,7 @@ class Pipeline:
         card = self.store.get_pr(key)
         if not self.store.claim_action(key, head, event):
             return
-        body = self.sign(text)
+        body = github.agent_review_body(head, self.sign(text))
         try:
             url = github.comment(card["repo"], card["number"], body)
         except github.GitHubError as exc:

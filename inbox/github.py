@@ -295,6 +295,22 @@ def approve_run(repo, run_id):
     gh(["api", "-X", "POST", f"repos/{repo}/actions/runs/{run_id}/approve"], write=True)
 
 
+AGENT_REVIEW_NOTICE = "[GoodNightOppie Review Agent] 自动审查，仅供参考，不是 QQ 的批准"
+
+
+def agent_review_body(commit_id, body):
+    """Label advisory output and bind it to one full commit, before model text."""
+    if not re.fullmatch(r"[0-9a-f]{40}", commit_id or ""):
+        raise ValueError("automatic review requires a full head SHA")
+    return f"{AGENT_REVIEW_NOTICE}\n\nHead: `{commit_id}`\n\n{body}"
+
+
+def submit_agent_review(repo, number, commit_id, body, comments=()):
+    """Automatic reviews cannot choose a GitHub review event."""
+    inline = [dict(c, body=agent_review_body(commit_id, c.get("body", ""))) for c in comments]
+    return submit_review(repo, number, commit_id, "COMMENT", agent_review_body(commit_id, body), inline)
+
+
 def submit_review(repo, number, commit_id, event, body, comments=()):
     """One batched review pinned to commit_id, so a stale head is rejected."""
     payload = {"commit_id": commit_id, "event": event, "body": body,

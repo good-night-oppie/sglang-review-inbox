@@ -683,7 +683,38 @@ class Pipeline:
         return self._github_search("assignee", "github-assigned", source_config)
 
     def poll_review_requested(self, source_config):
-        return self._github_search("review-requested", "github-review-request", source_config)
+        added = self._github_search("review-requested", "github-review-request", source_config)
+        return added + self.reconcile_open_prs()
+
+    def reconcile_open_prs(self):
+        """Backfill cards whose review request was cleared between search polls.
+
+        Existing cards and drafts are left alone. List/timeline errors propagate to
+        poll_sources so an incomplete reconciliation is never reported as healthy.
+        """
+        added = 0
+        for repo in sorted(self.repos):
+            for item in github.list_open_prs(repo):
+                if item.get("isDraft"):
+                    continue
+                key = pr_key(repo, item["number"])
+                if self.store.get_pr(key) is not None:
+                    continue
+                lines = (item.get("body") or "").splitlines()
+                wanted = bool(lines) and lines[0] == "QQ 请审"
+                if not wanted:
+                    events = github.pr_timeline(repo, item["number"])
+                    wanted = any(event.get("event") == "review_requested"
+                                 and (event.get("requested_reviewer") or {}).get("login") == self.login
+                                 for event in events)
+                if not wanted:
+                    continue
+                _, created = self.store.ensure_pr(repo, item["number"], requester={
+                    "id": f"reconcile:{repo}#{item['number']}", "source": "reconcile",
+                    "author": (item.get("author") or {}).get("login", ""),
+                    "permalink": item.get("url", ""), "text": item.get("title", ""), "ts": time.time()})
+                added += created
+        return added
 
     # ---- per-PR state machine -------------------------------------------
     def advance(self, card):

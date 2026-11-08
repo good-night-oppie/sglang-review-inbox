@@ -52,6 +52,18 @@ def fetch_pr(repo, number):
     return gh_json(["pr", "view", str(number), "--repo", repo, "--json", PR_FIELDS])
 
 
+def list_open_prs(repo):
+    """Open PRs used by the reconciliation pass; failures must reach the source status."""
+    return gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", "1000",
+                    "--json", "number,title,body,isDraft,url,author"]) or []
+
+
+def pr_timeline(repo, number):
+    """All timeline pages, so a cleared review request remains discoverable."""
+    pages = gh_json(["api", f"repos/{repo}/issues/{number}/timeline", "--paginate", "--slurp"]) or []
+    return [item for page in pages for item in page]
+
+
 GATE_CHECK = re.compile(r"pr-gate|call-gate")
 # `pr-test-finish` / `wait-for-stage-b` style jobs only aggregate upstream results.
 AGGREGATE_CHECK = re.compile(r"(^|[/ -])finish$|/ wait-for-")

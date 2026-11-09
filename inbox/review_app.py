@@ -168,8 +168,9 @@ class Client:
         if snap.get("draft"):
             if not draft_request:
                 raise AppError("APP_DRAFT_EXPLICIT_REQUEST_REQUIRED")
-            # The service-verified source is internal to the paired adapter;
-            # installing/accepting this candidate remains a separate C-tier step.
+            # The pinned 1.2.4 bundle still rejects draft_request. Draft posting
+            # remains fail-closed until plugin PRs #1 and #4 are integrated,
+            # the resulting bundle is re-pinned, and identity is re-verified.
             payload["draft_request"] = draft_request
         item = self.request(repo, "submit_review", payload)
         if not self._match(item, head, marker):

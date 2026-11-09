@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import traceback
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
@@ -1866,12 +1867,12 @@ class Pipeline:
                   if by == "human" or (f["verify"] == "confirmed" and f["severity"] != "nit" and agent.is_risk(f))]
         if not wanted:
             raise ValueError("no findings to publish")
-        if not self.store.claim_action(key, head, "review:findings"):
+        if self.findings_review(key, head):
             raise ValueError("findings for this head were already published")
         # Points already raised earlier are not posted again, only listed as still open.
         new = [f for f in wanted if not f.get("raised_before")]
         again = [f for f in wanted if f.get("raised_before")]
-        inline = [{"path": f["path"], "line": f["line"], "side": "RIGHT", "body": self.sign(finding_comment(f))}
+        inline = [{"path": f["path"], "line": f["line"], "side": "RIGHT", "body": finding_comment(f)}
                   for f in new if f.get("anchored")]
         loose = [f"- `{f['path']}:{f['line']}` {finding_comment(f)}" for f in new if not f.get("anchored")]
         must = sum(1 for f in wanted if f["severity"] in ("blocker", "major") and agent.is_risk(f))
@@ -1882,17 +1883,46 @@ class Pipeline:
         if again:
             body += "\n\nStill open from my last review:\n" + "\n".join(
                 f"- {plain(f['title'])} (`{f['path']}:{f['line']}`)" for f in again)
-        body = self.sign(body)
-        try:
-            if by == "human":
-                result = github.submit_review(card["repo"], card["number"], head, "COMMENT", body, inline)
-            else:
-                result = github.submit_agent_review(card["repo"], card["number"], head, body, inline)
-        except github.GitHubError:
-            self.store.finish_action(key, head, "review:findings", False)
-            raise
-        self.store.finish_action(key, head, "review:findings", True, result)
+        result = self.publish_app_comment(card, head, "review:findings", body, inline)
         self.store.add_event(key, "action", f"published {len(wanted)} finding(s)", result)
+        return result
+
+    def publish_app_comment(self, card, head, event, body, comments=()):
+        """Single existing publisher, with crash-safe marker and read-only recovery."""
+        key = card["key"]
+        action = next((a for a in self.store.actions(key) if a["event"] == event and a["head"] == head), None)
+        if action:
+            if action["phase"] == "done":
+                return action["result"]
+            marker = action["result"].get("marker")
+            if not self.store.unresolved_action(key, head, event):
+                done = next((a for a in self.store.actions(key)
+                             if a["event"] == event and a["head"] == head and a["phase"] == "done"), None)
+                if done:
+                    return done["result"]
+            if not marker:
+                raise github.GitHubWriteUnknown("legacy running review has no marker; investigate before retry")
+            try:
+                result = github.reconcile_agent_review(card["repo"], card["number"], head, marker)
+            except github.GitHubError:
+                raise github.GitHubWriteUnknown("App review unresolved; readback required") from None
+        else:
+            marker = f"<!-- reviewinbox:{uuid.uuid4().hex} -->"
+            if not self.store.claim_action(key, head, event, {"marker": marker}):
+                raise github.GitHubWriteUnknown("review action already in flight")
+            try:
+                result = github.submit_agent_review(card["repo"], card["number"], head, body, comments, marker=marker)
+            except github.GitHubWriteUnknown:
+                if not self.store.unresolved_action(key, head, event):
+                    done = next((a for a in self.store.actions(key)
+                                 if a["event"] == event and a["head"] == head and a["phase"] == "done"), None)
+                    if done:
+                        return done["result"]
+                raise
+            except github.GitHubError:
+                self.store.finish_action(key, head, event, False)
+                raise
+        self.store.finish_action(key, head, event, True, result)
         return result
 
     def publish_agent_review(self, key, note=""):
@@ -1903,22 +1933,13 @@ class Pipeline:
         if head != card["review_head"] or head != card["head_sha"]:
             raise ValueError("the head moved; automatic review comment is stale")
         event = "review:agent-comment"
-        done = next((a for a in self.store.actions(key)
-                     if a["event"] == event and a["head"] == head and a["phase"] == "done"), None)
-        if done:
-            result = done["result"]
-        elif self.store.claim_action(key, head, event):
-            review = card["review"] or {}
-            body = plain(note or review.get("approve_note") or review.get("summary") or "No blocking findings.")
-            try:
-                result = github.submit_agent_review(card["repo"], card["number"], head, body)
-            except github.GitHubError:
-                self.store.finish_action(key, head, event, False)
-                raise
-            self.store.finish_action(key, head, event, True, result)
+        already_done = any(a["event"] == event and a["head"] == head and a["phase"] == "done"
+                           for a in self.store.actions(key))
+        review = card["review"] or {}
+        body = plain(note or review.get("approve_note") or review.get("summary") or "No blocking findings.")
+        result = self.publish_app_comment(card, head, event, body)
+        if not already_done:
             self.store.add_event(key, "agent_comment", f"automatic review comment for {head}", result)
-        else:
-            return None
         self.set_ready(card, "approve", "automatic review is advisory; waiting for QQ's formal approval")
         return result
 

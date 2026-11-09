@@ -12,3 +12,11 @@ This is a private, Git-history-preserving maintenance fork, not a GitHub-native 
 This source archive does not deploy, restart or alter the live Inbox. GG maintains source/submodule updates; ReviewInbox manages the instance and its isolated adapter candidate; QQ reviews changes before release. Parent montclip-rsi pins an exact commit and does not execute this submodule in the patrol loop.
 
 Validation: python -m unittest discover -s tests (offline). Current-head test evidence is recorded in the parent delivery. Future updates must preserve unknown-write ledger records and reconcile remote results before retrying; never fall back to a shared GitHub identity when App authentication fails.
+
+## COMMENT candidate source provenance
+
+The review/app-comment branch imports only inbox/, tests/ and docs/ changes from original candidate 767f3f02412a302e08eb5e3b6f2471d52b6673b5 against25fc4d9d9dca25a5756ea00f0bb3a237fc7e5c28. Source/test trees are checked byte-for-byte. Local .execution_logs and .qa_logs are not published; this does not modify the original candidate or its ongoing work.
+
+Original reported validation:20 focused passed; full190=172passed/17existing skips/1baseline SkillTest failure. Publication checkout independently reran20focused successfully. Ruff was unavailable in original environment. Real verification was identity-only; no GitHub comments were sent.
+
+Deployment holds: fixed installed1.2.1 Windows Skill path/hash is machine-specific; plugin Draft COMMENT fix is separate oppie-github#1, not installed; managed service integration is separate oppie-github#2 and preview-only. Formal QQ approval remains pending. No new approval-gate changes from the original working tree are included.

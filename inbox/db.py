@@ -288,7 +288,7 @@ class Store:
         return [dict(row, data=json.loads(row["data"])) for row in rows]
 
     # ---- action ledger --------------------------------------------------
-    def claim_action(self, key, head, event):
+    def claim_action(self, key, head, event, result=None):
         """Reserve an external write. Returns False when it already ran or is
         in flight; an interrupted 'running' action is left for a human, never
         retried blindly, because the remote write may have happened."""
@@ -299,10 +299,19 @@ class Store:
             if row is not None:
                 return False
             self.conn.execute(
-                "INSERT INTO actions VALUES (?, ?, ?, 'running', '{}', ?)",
-                (key, head, event, time.time()))
+                "INSERT INTO actions VALUES (?, ?, ?, 'running', ?, ?)",
+                (key, head, event, json.dumps(result or {}), time.time()))
             self.conn.commit()
             return True
+
+    def unresolved_action(self, key, head, event):
+        """Preserve persisted marker and claim when remote effects are uncertain."""
+        with self.lock:
+            updated = self.conn.execute(
+                "UPDATE actions SET phase='unresolved', ts=? WHERE pr_key=? AND head=? AND event=? "
+                "AND phase IN ('running', 'unresolved')", (time.time(), key, head, event)).rowcount
+            self.conn.commit()
+            return bool(updated)
 
     def finish_action(self, key, head, event, ok, result=None):
         with self.lock:
@@ -313,7 +322,7 @@ class Store:
             else:
                 # Known failure with no remote effect: release so it can be retried.
                 self.conn.execute(
-                    "DELETE FROM actions WHERE pr_key=? AND head=? AND event=?", (key, head, event))
+                    "DELETE FROM actions WHERE pr_key=? AND head=? AND event=? AND phase='running'", (key, head, event))
             self.conn.commit()
 
     def actions(self, key):

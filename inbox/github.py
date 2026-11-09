@@ -4,6 +4,9 @@ the orchestrator does, so every GitHub write goes through one audited place."""
 import json
 import re
 import subprocess
+import uuid
+
+from . import review_app
 
 PR_FIELDS = (
     "number,title,author,url,state,isDraft,headRefOid,baseRefName,additions,deletions,"
@@ -16,6 +19,10 @@ JOB_URL = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/actions/runs/(\d+)/job/(\d+
 
 class GitHubError(RuntimeError):
     pass
+
+
+class GitHubWriteUnknown(GitHubError):
+    """A review might exist; keep its action claim until readback resolves it."""
 
 
 TRANSIENT = re.compile(r"EOF|timeout|timed out|connection reset|50[234]|TLS handshake", re.I)
@@ -307,7 +314,7 @@ def approve_run(repo, run_id):
     gh(["api", "-X", "POST", f"repos/{repo}/actions/runs/{run_id}/approve"], write=True)
 
 
-AGENT_REVIEW_NOTICE = "[GoodNightOppie Review Agent] 自动审查，仅供参考，不是 QQ 的批准"
+AGENT_REVIEW_NOTICE = "[ReviewInboxOppieXYZ Review Agent] 自动审查，仅供参考，不是 QQ 的批准"
 
 
 def agent_review_body(commit_id, body):
@@ -317,10 +324,23 @@ def agent_review_body(commit_id, body):
     return f"{AGENT_REVIEW_NOTICE}\n\nHead: `{commit_id}`\n\n{body}"
 
 
-def submit_agent_review(repo, number, commit_id, body, comments=()):
-    """Automatic reviews cannot choose a GitHub review event."""
+def submit_agent_review(repo, number, commit_id, body, comments=(), *, marker=None):
+    """Existing advisory writer; event and App identity are never model-selected."""
     inline = [dict(c, body=agent_review_body(commit_id, c.get("body", ""))) for c in comments]
-    return submit_review(repo, number, commit_id, "COMMENT", agent_review_body(commit_id, body), inline)
+    marker = marker or f"<!-- reviewinbox:{uuid.uuid4().hex} -->"
+    try:
+        return review_app.Client().submit(repo, number, commit_id, agent_review_body(commit_id, body), inline, marker)
+    except review_app.AppError as exc:
+        error = GitHubWriteUnknown if exc.unknown else GitHubError
+        raise error(str(exc)) from None
+
+
+def reconcile_agent_review(repo, number, commit_id, marker):
+    """Only remote actor + full head + persisted unique marker can resolve a claim."""
+    try:
+        return review_app.Client().reconcile(repo, number, commit_id, marker)
+    except review_app.AppError:
+        raise GitHubWriteUnknown("App review unresolved; readback required") from None
 
 
 def submit_review(repo, number, commit_id, event, body, comments=()):

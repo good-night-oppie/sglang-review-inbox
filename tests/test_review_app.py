@@ -43,7 +43,15 @@ class ReviewAppBoundaryTest(unittest.TestCase):
     def identity(self):
         return {"app_id": 5687106, "app_slug": "reviewinboxoppiexyz", "owner": "good-night-oppie",
                 "permissions": {"contents": "read", "metadata": "read", "issues": "write", "pull_requests": "write"},
-                "repositories": [{"full_name": REPO}, {"full_name": "good-night-oppie/MontClip-Cindy"}]}
+                "repositories": [{"full_name": REPO, "id": 1441621868},
+                                 {"full_name": "good-night-oppie/MontClip-Cindy", "id": 1446532339}],
+                "installationRepositories": [
+                    {"full_name": REPO, "id": 1441621868},
+                    {"full_name": "good-night-oppie/MontClip-Cindy", "id": 1446532339},
+                    {"full_name": "good-night-oppie/montclip-rsi", "id": 1450602468},
+                    {"full_name": "good-night-oppie/rsi-playbooks", "id": 1450603260},
+                    {"full_name": "good-night-oppie/oppie-github", "id": 1451885379},
+                    {"full_name": "good-night-oppie/sglang-review-inbox", "id": 1451900929}]}
 
     def test_installed_entry_is_resolved_and_hash_pinned(self):
         with tempfile.TemporaryDirectory() as tmp:

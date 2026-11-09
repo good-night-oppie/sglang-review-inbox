@@ -14,7 +14,17 @@ APP_ID = 5687106
 INSTALLATION_ID = 180305629
 SLUG = "reviewinboxoppiexyz"
 ACTOR = SLUG + "[bot]"
-REPOS = {"good-night-oppie/MontClip", "good-night-oppie/MontClip-Cindy"}
+# Installation is an identity boundary, not a grant to publish to every repo.
+EXECUTION_REPOSITORIES = {"good-night-oppie/MontClip": 1441621868,
+                          "good-night-oppie/MontClip-Cindy": 1446532339}
+INSTALLATION_REPOSITORIES = {
+    **EXECUTION_REPOSITORIES,
+    "good-night-oppie/montclip-rsi": 1450602468,
+    "good-night-oppie/rsi-playbooks": 1450603260,
+    "good-night-oppie/oppie-github": 1451885379,
+    "good-night-oppie/sglang-review-inbox": 1451900929,
+}
+REPOS = frozenset(EXECUTION_REPOSITORIES)
 PERMISSIONS = {"contents": "read", "metadata": "read", "issues": "write", "pull_requests": "write"}
 MARKER = re.compile(r"<!-- reviewinbox:[0-9a-f]{32} -->")
 
@@ -97,13 +107,20 @@ class Client:
         result = self.request(repo, "identity", {})
         if not isinstance(result, dict):
             raise AppError("APP_IDENTITY_MISMATCH")
-        repositories = result.get("repositories")
         if (result.get("app_id") != APP_ID or result.get("app_slug") != SLUG
                 or result.get("owner") != "good-night-oppie" or result.get("permissions") != PERMISSIONS
-                or not isinstance(repositories, list) or len(repositories) != 2
-                or any(not isinstance(r, dict) for r in repositories)
-                or {r.get("full_name") for r in repositories} != REPOS):
+                or not self._exact_repositories(result.get("installationRepositories"), INSTALLATION_REPOSITORIES)
+                or not self._exact_repositories(result.get("repositories"), EXECUTION_REPOSITORIES)):
             raise AppError("APP_IDENTITY_MISMATCH")
+
+    @staticmethod
+    def _exact_repositories(repositories, expected):
+        """Exact names and integer IDs, including cardinality and uniqueness."""
+        return (isinstance(repositories, list) and len(repositories) == len(expected)
+                and all(isinstance(repo, dict) and isinstance(repo.get("full_name"), str)
+                        and type(repo.get("id")) is int
+                        and expected.get(repo["full_name"]) == repo["id"] for repo in repositories)
+                and len({repo["full_name"] for repo in repositories}) == len(expected))
 
     @staticmethod
     def _validate(repo, number, head, marker):

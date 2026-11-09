@@ -34,3 +34,9 @@ Independent publication validation:32 App/source tests and6 page gate tests pass
 Source candidate158cc6a254018fb4e31814c668cd783114d1efce adds only ecosystem.config.js local path resolution/explicit environment overrides and a historical document path cleanup. Source trees match exactly; local validation logs remain excluded. Node syntax and diff checks were independently rerun. No Python behavior changed, so the full suite was not repeated.
 
 ReviewInbox reports QQ code approval for parent2b7f039 only; this added follow-up and the separate private runtime configuration readback still require QQ verification. Runtime configuration was not copied into this repository. The running production code has not been switched by this archive task. Historical commits retain historical local paths; history was not rewritten.
+
+## Installation/execution scope pairing
+
+Original Python candidate91520972b7e5df226248beb7db05a7caae8557b3 is archived as source/tests/docs only; local run logs are excluded. Paired plugin candidate: oppie-github PR#4,20ef482ad4af504b19f237aba82c3f21ab5aa810, bundleSHA2564c306c3d94341ff2e8d43ab0212e7cf996d6faf0cff54814c57c22e4c6838813. Plugin live identity independently verified six installation repositories and a narrowed two-repository execution token; Python checks both exact sets and existing permission levels. These are two candidates requiring joint QQ C-class review, not an installed pair.
+
+Independent archive tests:7 installation-scope and32 existing App/source/ledger pass. Original full215=197pass/17skip/1unchanged baseline SkillTest failure; lint unavailable. Python still pins old installed1.2.1 c768 hash intentionally. Runtime identity remains fail-closed after installation scope expanded; historical158上线approval does not establish current health. Do not edit production hash/config or restart before reviewed installation and actual entry/hash/identity acceptance.

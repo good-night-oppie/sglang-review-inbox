@@ -51,6 +51,7 @@ JSON_COLUMNS = ("labels", "meta", "triage", "review", "ci", "decision", "request
 # pipeline) | resolved (its PRs are merged/closed) | dismissed (you marked it
 # handled). conv: channel | dm.
 MENTION_COLUMNS = {
+    "user_id": "TEXT DEFAULT ''",
     "kind": "TEXT DEFAULT ''", "team_id": "TEXT DEFAULT ''", "channel_id": "TEXT DEFAULT ''",
     "thread_ts": "TEXT DEFAULT ''", "conv": "TEXT DEFAULT 'channel'", "status": "TEXT DEFAULT 'pending'",
     "status_note": "TEXT DEFAULT ''", "checked_at": "REAL DEFAULT 0", "count": "INTEGER DEFAULT 1",
@@ -176,6 +177,7 @@ class Store:
     # ---- mentions -------------------------------------------------------
     def _mention_row(self, mention):
         defaults = {"channel": "", "author": "", "permalink": "", "pr_keys": [], "kind": "",
+                    "user_id": "",
                     "team_id": "", "channel_id": "", "thread_ts": "", "conv": "channel",
                     "status": "pending", "status_note": "", "checked_at": 0, "count": 1}
         row = dict(defaults, **{k: v for k, v in mention.items() if k in MENTION_FIELDS})
@@ -213,6 +215,12 @@ class Store:
         with self.lock:
             self.conn.execute("UPDATE mentions SET status=?, status_note=?, checked_at=? WHERE id=?",
                               (status, note, time.time(), mention_id))
+            self.conn.commit()
+
+    def mark_review_ask(self, mention_id):
+        """Record the service's explicit-request classification, not a model claim."""
+        with self.lock:
+            self.conn.execute("UPDATE mentions SET kind='review' WHERE id=?", (mention_id,))
             self.conn.commit()
 
     def has_mention(self, mention_id):

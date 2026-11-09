@@ -9,8 +9,6 @@ from pathlib import Path
 import re
 import subprocess
 
-ENTRY = Path(r"C:\Users\tyb90\AppData\Roaming\CindyGlobal\codex-home\skills\cindy-cindy-plugin-_ns__local__oppie-github%3Aoppie-github-work\scripts\review-request.cjs")
-REAL_ENTRY = Path(r"C:\Users\tyb90\AppData\Roaming\CindyGlobal\owners\a1954e134280bba42924\ghost-install-state\skill-snapshots\_ns\local\oppie-github\6a7c78e3-d952-476e-9cc3-8d95e955b87c\skills\oppie-github-work\scripts\review-request.cjs")
 SHA256 = "c7681c8930c7c6aab68b91518513b1032cf9c43d73e30ba64d4d48beb6aa044c"
 APP_ID = 5687106
 INSTALLATION_ID = 180305629
@@ -30,14 +28,33 @@ class AppError(RuntimeError):
 
 
 class Client:
+    def __init__(self, settings=None):
+        self.settings = settings or {}
+
+    def _configured_path(self, key):
+        value = self.settings.get(key)
+        if not isinstance(value, str) or not value or not Path(value).is_absolute():
+            raise AppError("APP_RUNTIME_PATH_UNCONFIGURED")
+        return Path(value).resolve(strict=True)
+
     def _entry(self):
         try:
-            entry = ENTRY.resolve(strict=True)
-            if entry != REAL_ENTRY.resolve(strict=True) or hashlib.sha256(entry.read_bytes()).hexdigest() != SHA256:
+            entry = self._configured_path("entry")
+            if (entry != self._configured_path("real_entry") or self.settings.get("sha256") != SHA256
+                    or hashlib.sha256(entry.read_bytes()).hexdigest() != SHA256):
                 raise AppError("APP_ADAPTER_PIN_MISMATCH")
             return entry
         except OSError:
             raise AppError("APP_ADAPTER_UNAVAILABLE") from None
+
+    def _node(self):
+        try:
+            node = self._configured_path("node_executable")
+            if not node.is_file():
+                raise AppError("APP_NODE_UNAVAILABLE")
+            return node
+        except OSError:
+            raise AppError("APP_NODE_UNAVAILABLE") from None
 
     def request(self, repo, operation, args):
         """One bounded request; no retry. Only explicit not_executed is retryable."""
@@ -50,8 +67,9 @@ class Client:
         if len(data.encode("utf-8")) > 262144:
             raise AppError("APP_INPUT_TOO_LARGE")
         entry = self._entry()  # Failure here proves that no process was started.
+        node = self._node()
         try:
-            proc = subprocess.run(["node", str(entry)], input=data, capture_output=True,
+            proc = subprocess.run([str(node), str(entry)], input=data, capture_output=True,
                                   text=True, encoding="utf-8", errors="strict", timeout=120,
                                   cwd=str(entry.parent), shell=False)
         except (OSError, subprocess.SubprocessError, UnicodeError):
@@ -114,8 +132,15 @@ class Client:
         return {"id": ident, "url": url, "marker": marker, "actor": ACTOR,
                 "app_id": APP_ID, "installation_id": INSTALLATION_ID}
 
-    def submit(self, repo, number, head, body, comments, marker):
+    def submit(self, repo, number, head, body, comments, marker, *, draft_request=None):
         self._validate(repo, number, head, marker)
+        if draft_request is not None:
+            valid = isinstance(draft_request, str) and (
+                draft_request == f"manual:{repo}#{number}"
+                or re.fullmatch(r"slack:[A-Z0-9]+:[A-Z0-9]+:[0-9]+(?:\.[0-9]+)?", draft_request)
+                or re.fullmatch(re.escape(f"action:{repo}#{number}:{head}:") + r"[0-9a-f]{32}", draft_request))
+            if not valid:
+                raise AppError("APP_DRAFT_SOURCE_INVALID")
         self.identity(repo)
         snap = self.request(repo, "get_pull", {"number": number})
         if (not isinstance(snap, dict) or (snap.get("head") or {}).get("sha") != head
@@ -123,6 +148,12 @@ class Client:
             raise AppError("APP_STALE_OR_UNREVIEWABLE_HEAD")
         payload = {"number": number, "commit_id": head, "event": "COMMENT",
                    "body": body + "\n\n" + marker, "comments": list(comments)}
+        if snap.get("draft"):
+            if not draft_request:
+                raise AppError("APP_DRAFT_EXPLICIT_REQUEST_REQUIRED")
+            # 1.2.1 rejects this field; keep that fail-closed behavior until a
+            # reviewed replacement bundle/version/hash is explicitly accepted.
+            payload["draft_request"] = draft_request
         item = self.request(repo, "submit_review", payload)
         if not self._match(item, head, marker):
             raise AppError("APP_REVIEW_RECEIPT_MISMATCH", unknown=True)

@@ -175,10 +175,10 @@ class AutomaticReviewPipelineTest(unittest.TestCase):
         self.assert_advisory_only()
         self.assertEqual(self.payloads[0]["comments"][0]["body"].splitlines()[0], github.AGENT_REVIEW_NOTICE)
 
-    def test_explicit_human_button_is_separate_from_model_output(self):
-        self.pipe.approve(self.key, note="QQ explicit manual review of this head", by="human")
-        self.assertEqual(self.payloads[0]["event"], "APPROVE")
-        self.assertEqual(self.payloads[0]["commit_id"], HEAD)
+    def test_explicit_human_button_cannot_become_a_formal_approval(self):
+        with self.assertRaises(PermissionError):
+            self.pipe.approve(self.key, note="QQ explicit manual review of this head", by="human")
+        self.assertEqual(self.payloads, [])
 
 
 if __name__ == "__main__":

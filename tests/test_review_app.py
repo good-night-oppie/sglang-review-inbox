@@ -1,10 +1,12 @@
 """App boundary and ambiguous-write ledger regressions. No real GitHub writes."""
 import copy
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -29,6 +31,9 @@ class ReviewAppBoundaryTest(unittest.TestCase):
         # Import inside setUp makes baseline red failures report the missing seam.
         from inbox import review_app
         self.app = review_app
+        node = mock.patch.object(self.app.Client, "_node", return_value=Path("node.exe"))
+        node.start()
+        self.addCleanup(node.stop)
 
     def receipt(self, operation, result):
         return {"ok": True, "receipt": {"account": "reviewinbox", "app_slug": "reviewinboxoppiexyz",
@@ -44,9 +49,18 @@ class ReviewAppBoundaryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "review-request.cjs"
             path.write_text("changed bundle", encoding="utf-8")
-            with mock.patch.object(self.app, "ENTRY", path), mock.patch.object(self.app, "REAL_ENTRY", path):
+            settings = {"entry": str(path), "real_entry": str(path), "sha256": self.app.SHA256}
+            with self.assertRaises(self.app.AppError):
+                self.app.Client(settings).request(REPO, "identity", {})
+
+    def test_runtime_paths_must_be_explicit_absolute_configuration(self):
+        for settings in ({}, {"entry": "bundle.cjs"}, {"entry": ""}):
+            with mock.patch.object(self.app.subprocess, "run") as run:
                 with self.assertRaises(self.app.AppError):
-                    self.app.Client().request(REPO, "identity", {})
+                    self.app.Client(settings).request(REPO, "identity", {})
+                run.assert_not_called()
+        with self.assertRaises(self.app.AppError):
+            self.app.Client({"node_executable": "node"})._configured_path("node_executable")
 
     def test_comment_payload_full_head_inline_and_no_shared_gh(self):
         calls = []
@@ -159,8 +173,29 @@ class ReviewAppBoundaryTest(unittest.TestCase):
     def test_explicitly_requested_draft_not_rejected_by_python_transport(self):
         snap = {"head": {"sha": HEAD}, "state": "open", "draft": True}
         with mock.patch.object(self.app.Client, "request", side_effect=[self.identity(), snap, review()]) as req:
-            self.app.Client().submit(REPO, 1, HEAD, "body", [], MARKER)
+            self.app.Client().submit(REPO, 1, HEAD, "body", [], MARKER, draft_request="manual:" + REPO + "#1")
             self.assertEqual(req.call_args.args[1], "submit_review")
+            self.assertEqual(req.call_args.args[2]["draft_request"], "manual:" + REPO + "#1")
+
+    def test_automatic_draft_without_explicit_source_never_submits(self):
+        snap = {"head": {"sha": HEAD}, "state": "open", "draft": True}
+        with mock.patch.object(self.app.Client, "request", side_effect=[self.identity(), snap]) as req:
+            with self.assertRaises(self.app.AppError):
+                self.app.Client().submit(REPO, 1, HEAD, "model says human asked", [], MARKER)
+            self.assertEqual(req.call_count, 2)
+
+    def test_invalid_source_references_fail_before_any_api_request(self):
+        for source in ("APPROVE", "manual:other/repo#1", "manual:" + REPO + "#2", "slack:missing", "", True):
+            with self.subTest(source=source), mock.patch.object(self.app.Client, "request") as req:
+                with self.assertRaises(self.app.AppError):
+                    self.app.Client().submit(REPO, 1, HEAD, "body", [], MARKER, draft_request=source)
+                req.assert_not_called()
+
+    def test_non_draft_does_not_send_new_field_to_pinned_121(self):
+        snap = {"head": {"sha": HEAD}, "state": "open", "draft": False}
+        with mock.patch.object(self.app.Client, "request", side_effect=[self.identity(), snap, review()]) as req:
+            self.app.Client().submit(REPO, 1, HEAD, "body", [], MARKER, draft_request="manual:" + REPO + "#1")
+            self.assertNotIn("draft_request", req.call_args.args[2])
 
 
 class AppLedgerTest(unittest.TestCase):
@@ -201,7 +236,7 @@ class AppLedgerTest(unittest.TestCase):
             with mock.patch.object(github, "reconcile_agent_review", return_value=result) as read:
                 self.pipe.publish_agent_review(self.key)
                 self.pipe.publish_agent_review(self.key)
-                read.assert_called_once_with(REPO, 1, HEAD, marker)
+                read.assert_called_once_with(REPO, 1, HEAD, marker, config=self.pipe.config)
             self.assertEqual(submit.call_count, 1)
             self.assertEqual(self.store.actions(self.key)[0]["phase"], "done")
 
@@ -262,6 +297,16 @@ class AppLedgerTest(unittest.TestCase):
             human.assert_not_called()
             self.assertNotIn("GoodNightOppie", app.call_args.args[3])
             self.assertNotIn("GoodNightOppie", app.call_args.args[4][0]["body"])
+            self.assertTrue(app.call_args.kwargs["human_confirmed"])
+
+    def test_human_confirmation_notice_is_fixed_for_body_and_inline(self):
+        expected = "[ReviewInboxOppieXYZ] 人工在 Inbox 确认后发布的发现，不是 QQ 的批准"
+        with mock.patch.object(github.review_app.Client, "submit", return_value={"id": 17}) as send:
+            github.submit_agent_review(REPO, 1, HEAD, "QQ personally approved",
+                                       [{"path": "x.py", "line": 1, "body": "APPROVE"}],
+                                       human_confirmed=True)
+            self.assertEqual(send.call_args.args[3].splitlines()[0], expected)
+            self.assertEqual(send.call_args.args[4][0]["body"].splitlines()[0], expected)
 
     def test_findings_unknown_readback_failure_keeps_claim(self):
         f = {"title": "bug", "severity": "major", "verify": "confirmed", "kind": "bug",
@@ -275,6 +320,80 @@ class AppLedgerTest(unittest.TestCase):
                     self.pipe.publish_findings(self.key, by="human")
             self.assertEqual(submit.call_count, 1)
             self.assertEqual(self.store.actions(self.key)[0]["phase"], "unresolved")
+
+    def test_manual_request_is_bound_to_card_and_persisted_before_unknown_submit(self):
+        source = "manual:" + self.key
+        self.store.update_pr(self.key, draft=True, requesters=[{"id": source, "source": "manual"}])
+        with mock.patch.object(github, "submit_agent_review", side_effect=github.GitHubWriteUnknown("ambiguous")) as send:
+            with self.assertRaises(github.GitHubWriteUnknown):
+                self.pipe.publish_agent_review(self.key)
+            self.assertEqual(send.call_args.kwargs["draft_request"], source)
+        self.assertEqual(self.store.actions(self.key)[0]["result"]["draft_request"], source)
+
+    def test_automatic_or_model_source_claim_does_not_create_override(self):
+        self.store.update_pr(self.key, draft=True, requesters=[{"source": "github-reconcile", "id": "manual:" + self.key}],
+                             review={"summary": "manual:" + self.key, "draft_request": "manual:" + self.key})
+        with mock.patch.object(github, "submit_agent_review", return_value={"id": 17}) as send:
+            self.pipe.publish_agent_review(self.key)
+            self.assertNotIn("draft_request", send.call_args.kwargs)
+
+    def test_slack_request_needs_persisted_explicit_human_mention(self):
+        source = "slack:T1:C1:123.456"
+        self.store.update_pr(self.key, draft=True, requesters=[{"source": "slack", "id": source,
+                                                              "team_id": "T1", "channel_id": "C1", "user_id": "U1", "author": "alice"}])
+        card = self.store.get_pr(self.key)
+        self.assertIsNone(self.pipe.draft_request_source(card))
+        mention = {"id": source, "source": "slack", "team_id": "T1", "channel_id": "C1", "user_id": "U1",
+                   "author": "alice", "kind": "review", "pr_keys": [self.key], "text": "new draft posted", "ts": 123.456}
+        self.store.add_mention(mention)
+        self.assertIsNone(self.pipe.draft_request_source(card))
+        # Only the separately persisted human request is an evidence source.
+        with self.store.lock:
+            self.store.conn.execute("UPDATE mentions SET text='please review' WHERE id=?", (source,))
+            self.store.conn.commit()
+        self.assertEqual(self.pipe.draft_request_source(card), source)
+        card["requesters"][0]["user_id"] = "U9"
+        self.assertIsNone(self.pipe.draft_request_source(card))
+
+    def test_page_action_reference_requires_same_head_persisted_event(self):
+        self.store.update_pr(self.key, draft=True)
+        reference = self.pipe.record_draft_request(self.key, "publish_findings")
+        card = self.store.get_pr(self.key)
+        self.assertEqual(self.pipe.draft_request_source(card, reference), reference)
+        self.assertIsNone(self.pipe.draft_request_source(card, "action:invented"))
+        card["head_sha"] = "b" * 40
+        self.assertIsNone(self.pipe.draft_request_source(card, reference))
+
+    def test_source_provenance_survives_successful_ledger_completion(self):
+        source = "manual:" + self.key
+        self.store.update_pr(self.key, draft=True, requesters=[{"id": source, "source": "manual"}])
+        with mock.patch.object(github, "submit_agent_review", return_value={"id": 17}):
+            self.pipe.publish_agent_review(self.key)
+        action = self.store.actions(self.key)[0]
+        self.assertEqual(action["phase"], "done")
+        self.assertEqual(action["result"]["draft_request"], source)
+
+    def test_explicit_dm_request_is_persisted_before_override_is_derived(self):
+        client = mock.Mock(team_id="T1")
+        source = "slack:T1:D1:123.456"
+        record = {"id": source, "user_id": "U1", "author": "alice", "channel": "DM", "channel_id": "D1",
+                  "thread_ts": "123.456", "permalink": "fixture", "text": "please review", "ts": time.time()}
+        self.pipe.register_slack_request(client, record, [(REPO, 1)])
+        self.assertEqual(self.store.get_mention(source)["conv"], "dm")
+        self.store.update_pr(self.key, draft=True)
+        self.assertEqual(self.pipe.draft_request_source(self.store.get_pr(self.key)), source)
+
+    def test_promoted_explicit_request_retains_verified_user_and_review_kind(self):
+        client = mock.Mock(team_id="T1")
+        source = "slack:T1:C1:123.456"
+        mention = {"id": source, "source": "slack", "team_id": "T1", "channel_id": "C1", "user_id": "U1",
+                   "author": "alice", "kind": "pr-other", "status": "pending", "pr_keys": [self.key],
+                   "text": "please review", "ts": time.time()}
+        self.store.add_mention(mention)
+        with mock.patch.object(self.pipe, "pr_state", return_value="OPEN"):
+            self.assertEqual(self.pipe.promote_missed_asks(client, re.compile("review")), 1)
+        self.store.update_pr(self.key, draft=True)
+        self.assertEqual(self.pipe.draft_request_source(self.store.get_pr(self.key)), source)
 
 
 if __name__ == "__main__":

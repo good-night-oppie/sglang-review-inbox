@@ -25,6 +25,14 @@ class GitHubWriteUnknown(GitHubError):
     """A review might exist; keep its action claim until readback resolves it."""
 
 
+class ApprovalDisabled(PermissionError):
+    """Formal approval is not an action authorized by a page token."""
+
+
+class MergeDisabled(PermissionError):
+    """Page tokens do not identify QQ or authorize entry to the merge queue."""
+
+
 TRANSIENT = re.compile(r"EOF|timeout|timed out|connection reset|50[234]|TLS handshake", re.I)
 
 
@@ -315,38 +323,54 @@ def approve_run(repo, run_id):
 
 
 AGENT_REVIEW_NOTICE = "[ReviewInboxOppieXYZ Review Agent] 自动审查，仅供参考，不是 QQ 的批准"
+HUMAN_FINDINGS_NOTICE = "[ReviewInboxOppieXYZ] 人工在 Inbox 确认后发布的发现，不是 QQ 的批准"
 
 
-def agent_review_body(commit_id, body):
+def agent_review_body(commit_id, body, *, human_confirmed=False):
     """Label advisory output and bind it to one full commit, before model text."""
     if not re.fullmatch(r"[0-9a-f]{40}", commit_id or ""):
         raise ValueError("automatic review requires a full head SHA")
-    return f"{AGENT_REVIEW_NOTICE}\n\nHead: `{commit_id}`\n\n{body}"
+    notice = HUMAN_FINDINGS_NOTICE if human_confirmed else AGENT_REVIEW_NOTICE
+    return f"{notice}\n\nHead: `{commit_id}`\n\n{body}"
 
 
-def submit_agent_review(repo, number, commit_id, body, comments=(), *, marker=None):
+def submit_agent_review(repo, number, commit_id, body, comments=(), *, marker=None,
+                        human_confirmed=False, draft_request=None, config=None):
     """Existing advisory writer; event and App identity are never model-selected."""
-    inline = [dict(c, body=agent_review_body(commit_id, c.get("body", ""))) for c in comments]
+    inline = [dict(c, body=agent_review_body(commit_id, c.get("body", ""), human_confirmed=human_confirmed)) for c in comments]
     marker = marker or f"<!-- reviewinbox:{uuid.uuid4().hex} -->"
     try:
-        return review_app.Client().submit(repo, number, commit_id, agent_review_body(commit_id, body), inline, marker)
+        options = {"draft_request": draft_request} if draft_request is not None else {}
+        return review_app.Client((config or {}).get("review_app", {})).submit(
+            repo, number, commit_id, agent_review_body(commit_id, body, human_confirmed=human_confirmed), inline, marker, **options)
     except review_app.AppError as exc:
         error = GitHubWriteUnknown if exc.unknown else GitHubError
         raise error(str(exc)) from None
 
 
-def reconcile_agent_review(repo, number, commit_id, marker):
+def reconcile_agent_review(repo, number, commit_id, marker, *, config=None):
     """Only remote actor + full head + persisted unique marker can resolve a claim."""
     try:
-        return review_app.Client().reconcile(repo, number, commit_id, marker)
+        return review_app.Client((config or {}).get("review_app", {})).reconcile(repo, number, commit_id, marker)
     except review_app.AppError:
         raise GitHubWriteUnknown("App review unresolved; readback required") from None
 
 
 def submit_review(repo, number, commit_id, event, body, comments=()):
-    """One batched review pinned to commit_id, so a stale head is rejected."""
+    """Legacy COMMENT helper; never an alternate formal approval outlet."""
+    if event != "COMMENT":
+        raise GitHubError("FORMAL_APPROVAL_DISABLED")
     payload = {"commit_id": commit_id, "event": event, "body": body,
                "comments": [c for c in comments if c.get("path") and c.get("line")]}
     data = gh_json(["api", "-X", "POST", f"repos/{repo}/pulls/{number}/reviews", "--input", "-"],
                    input_text=json.dumps(payload), write=True)
     return {"id": data.get("id"), "url": data.get("html_url")}
+
+
+def submit_qualified_approval(repo, number, commit_id, decision):
+    """Reserved sole classifier outlet, closed until separately reviewed implementation.
+
+    No decision, role string, config flag or page request can enable it today.
+    This stub intentionally has no GitHub transport, credentials or side effects.
+    """
+    raise GitHubError("FORMAL_APPROVAL_DISABLED")

@@ -371,6 +371,14 @@ class Pipeline:
                    and not r.get("user", {}).get("login", "").endswith("[bot]") for r in reviews)
 
     def register_slack_request(self, client, record, refs):
+        # DM ingress used to attach only a requester. Persist explicit human
+        # asks as source evidence too; link-only automatic asks get no override.
+        intent = re.compile(self.config["sources"]["slack"]["review_intent"], re.I)
+        if (re.fullmatch(r"[UW][A-Z0-9]+", record.get("user_id", ""))
+                and intent.search(record.get("text", "")) and not self.store.has_mention(record["id"])):
+            self.store.add_mention(dict(record, source="slack", team_id=client.team_id,
+                conv=record.get("conv") or ("dm" if record.get("channel") == "DM" else "channel"),
+                kind="review", status="agent", pr_keys=[pr_key(*ref) for ref in refs]))
         for repo, number in refs:
             self.store.ensure_pr(repo, number, requester={
                 "id": record["id"], "source": "slack", "author": record["author"],
@@ -449,6 +457,7 @@ class Pipeline:
                 continue
             refs = [tuple(key.split("#")) for key in item["pr_keys"]]
             self.store.set_mention_status(item["id"], "agent", "review ask (re-read with the current rules)")
+            self.store.mark_review_ask(item["id"])
             self.register_slack_request(client, dict(item, thread_ts=item["thread_ts"] or f"{item['ts']:.6f}"),
                                         [(repo, int(number)) for repo, number in refs])
             promoted += 1
@@ -1858,7 +1867,49 @@ class Pipeline:
                              {"url": url})
         return True
 
-    def publish_findings(self, key, by):
+    def record_draft_request(self, key, action):
+        """Page COMMENT action evidence; a caller declaration, not named identity."""
+        card = self.store.get_pr(key)
+        if action not in ("publish_findings", "request_changes") or not card or not card["draft"]:
+            return None
+        head = card["head_sha"]
+        if head != card["review_head"] or not re.fullmatch(r"[0-9a-f]{40}", head):
+            raise ValueError("draft action is stale")
+        ref = f"action:{key}:{head}:{uuid.uuid4().hex}"
+        self.store.add_event(key, "draft_request", "explicit page action for Draft findings",
+                             {"reference": ref, "head": head, "action": action})
+        return ref
+
+    def draft_request_source(self, card, action_ref=None):
+        """Use only service records, never model text or arbitrary request fields."""
+        if not card.get("draft"):
+            return None
+        if action_ref:
+            for event in self.store.events(card["key"]):
+                data = event["data"]
+                if (event["kind"] == "draft_request" and data.get("reference") == action_ref
+                        and data.get("head") == card["head_sha"]
+                        and data.get("action") in ("publish_findings", "request_changes")):
+                    return action_ref
+            return None
+        intent = re.compile(self.config["sources"]["slack"]["review_intent"], re.I)
+        for requester in card["requesters"]:
+            ref = requester.get("id", "")
+            if requester.get("source") == "manual" and ref == f"manual:{card['key']}":
+                return ref
+            if requester.get("source") != "slack" or not re.fullmatch(r"slack:[A-Z0-9]+:[A-Z0-9]+:[0-9]+(?:\.[0-9]+)?", ref):
+                continue
+            mention = self.store.get_mention(ref)
+            if (mention and mention["source"] == "slack" and mention["kind"] == "review"
+                    and card["key"] in mention["pr_keys"] and intent.search(mention["text"])
+                    and re.fullmatch(r"[UW][A-Z0-9]+", requester.get("user_id", ""))
+                    and mention["author"] and mention["author"] == requester.get("author")
+                    and all(mention[k] == requester.get(k) for k in ("user_id", "team_id", "channel_id"))
+                    and ref.split(":")[1:3] == [mention["team_id"], mention["channel_id"]]):
+                return ref
+        return None
+
+    def publish_findings(self, key, by, *, draft_request=None):
         card = self.store.get_pr(key)
         review, head = card["review"], card["review_head"]
         if head != card["head_sha"]:
@@ -1883,11 +1934,13 @@ class Pipeline:
         if again:
             body += "\n\nStill open from my last review:\n" + "\n".join(
                 f"- {plain(f['title'])} (`{f['path']}:{f['line']}`)" for f in again)
-        result = self.publish_app_comment(card, head, "review:findings", body, inline)
+        source = self.draft_request_source(card, draft_request if by == "human" else None)
+        result = self.publish_app_comment(card, head, "review:findings", body, inline,
+                                          human_confirmed=by == "human", draft_request=source)
         self.store.add_event(key, "action", f"published {len(wanted)} finding(s)", result)
         return result
 
-    def publish_app_comment(self, card, head, event, body, comments=()):
+    def publish_app_comment(self, card, head, event, body, comments=(), *, human_confirmed=False, draft_request=None):
         """Single existing publisher, with crash-safe marker and read-only recovery."""
         key = card["key"]
         action = next((a for a in self.store.actions(key) if a["event"] == event and a["head"] == head), None)
@@ -1895,6 +1948,7 @@ class Pipeline:
             if action["phase"] == "done":
                 return action["result"]
             marker = action["result"].get("marker")
+            evidence = action["result"]
             if not self.store.unresolved_action(key, head, event):
                 done = next((a for a in self.store.actions(key)
                              if a["event"] == event and a["head"] == head and a["phase"] == "done"), None)
@@ -1903,15 +1957,22 @@ class Pipeline:
             if not marker:
                 raise github.GitHubWriteUnknown("legacy running review has no marker; investigate before retry")
             try:
-                result = github.reconcile_agent_review(card["repo"], card["number"], head, marker)
+                result = github.reconcile_agent_review(card["repo"], card["number"], head, marker, config=self.config)
             except github.GitHubError:
                 raise github.GitHubWriteUnknown("App review unresolved; readback required") from None
         else:
             marker = f"<!-- reviewinbox:{uuid.uuid4().hex} -->"
-            if not self.store.claim_action(key, head, event, {"marker": marker}):
+            if draft_request is None:
+                draft_request = self.draft_request_source(card)
+            evidence = {"marker": marker, "human_confirmed": human_confirmed}
+            if draft_request:
+                evidence["draft_request"] = draft_request
+            if not self.store.claim_action(key, head, event, evidence):
                 raise github.GitHubWriteUnknown("review action already in flight")
             try:
-                result = github.submit_agent_review(card["repo"], card["number"], head, body, comments, marker=marker)
+                options = {"draft_request": draft_request} if draft_request else {}
+                result = github.submit_agent_review(card["repo"], card["number"], head, body, comments,
+                    marker=marker, human_confirmed=human_confirmed, config=self.config, **options)
             except github.GitHubWriteUnknown:
                 if not self.store.unresolved_action(key, head, event):
                     done = next((a for a in self.store.actions(key)
@@ -1922,6 +1983,9 @@ class Pipeline:
             except github.GitHubError:
                 self.store.finish_action(key, head, event, False)
                 raise
+        result = dict(result, marker=marker, human_confirmed=evidence.get("human_confirmed", False))
+        if evidence.get("draft_request"):
+            result["draft_request"] = evidence["draft_request"]
         self.store.finish_action(key, head, event, True, result)
         return result
 
@@ -1944,39 +2008,10 @@ class Pipeline:
         return result
 
     def approve(self, key, note="", by="human"):
+        """Legacy automatic callers get advisory COMMENT; human callers cannot approve."""
         if by != "human":
             return self.publish_agent_review(key, note)
-        card = self.store.get_pr(key)
-        snap = github.fetch_pr(card["repo"], card["number"])
-        head = snap["headRefOid"]
-        if head != card["review_head"]:
-            raise ValueError(f"head moved from {card['review_head'][:8]} to {head[:8]}; re-review first")
-        if head in github.approved_heads(card["repo"], card["number"], self.login):
-            self.store.set_stage(key, "approved", "you already approved this head on GitHub")
-            raise ValueError("you already approved this head on GitHub")
-        if not self.store.claim_action(key, head, "review:approve"):
-            raise ValueError("this head was already approved")
-        if note:  # typed by you: posted as is
-            body = note
-        else:
-            body = plain(card["review"].get("approve_note")) or "LGTM."
-            if self.findings_review_any(key) and any(
-                    f["severity"] in ("blocker", "major") and not agent.is_risk(f) for f in card["review"]["findings"]):
-                body += "\n\nThe earlier asks for more tests or numbers aren't blocking."
-            body = self.sign(body)
-        try:
-            result = github.submit_review(card["repo"], card["number"], head, "APPROVE", body)
-        except github.GitHubError:
-            self.store.finish_action(key, head, "review:approve", False)
-            raise
-        self.store.finish_action(key, head, "review:approve", True, dict(result, by=by))
-        self.store.add_event(key, "approve", f"{'agent' if by == 'agent' else 'you'} approved {head[:8]}", result)
-        labels = {label["name"] for label in snap.get("labels") or []}
-        if ci.RUN_CI_LABEL not in labels and self.policy["auto_ci"]:
-            self.send_ci(card, head, "tag-and-rerun", "/tag-and-rerun-ci", "no run-ci label",
-                         self.ci_attempts(key, head, "tag-and-rerun"), by=by)
-        self.store.set_stage(key, "approved", "approved, tracking CI until mergeable")
-        return result
+        raise github.ApprovalDisabled("FORMAL_APPROVAL_DISABLED")
 
     def merge(self, key, by="human"):
         """Your click, or the agent once the PR meets the merge bar (policy

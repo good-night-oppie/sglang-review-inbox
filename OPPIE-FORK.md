@@ -20,3 +20,11 @@ The review/app-comment branch imports only inbox/, tests/ and docs/ changes from
 Original reported validation:20 focused passed; full190=172passed/17existing skips/1baseline SkillTest failure. Publication checkout independently reran20focused successfully. Ruff was unavailable in original environment. Real verification was identity-only; no GitHub comments were sent.
 
 Deployment holds: fixed installed1.2.1 Windows Skill path/hash is machine-specific; plugin Draft COMMENT fix is separate oppie-github#1, not installed; managed service integration is separate oppie-github#2 and preview-only. Formal QQ approval remains pending. No new approval-gate changes from the original working tree are included.
+
+## Combined candidate update
+
+Original candidate 2b7f039082a1949ff0728ce3f51369deaaea5be1 supersedes767f3f0 for review. Source/test/docs/config.example.json/server.py/web trees match that exact candidate; execution/QA logs remain excluded. User-specific installation paths are now explicit private runtime settings, not source defaults.
+
+This update blocks page-token approve AND merge before external requests, labels human-confirmed COMMENT findings separately, and derives optional Draft provenance from persisted service-owned sources only. It does not enable future approval automation. The existing installed1.2.1 hash remains pinned, so actual Draft posting still fails closed pending the reviewed plugin update.
+
+Independent publication validation:32 App/source tests and6 page gate tests passed. Original full result208=190pass/17skip/1unchanged baseline failure; lint unavailable. No deployment or real comment writes. QQ approval is still pending and the plugin parent pins remain unchanged.

@@ -2,6 +2,10 @@
 
 Status: candidate only; no deployment, restart, new schedule or GitHub review posted.
 
+Current behavior and runtime configuration are specified in `2026-11-09-qq-followup-and-draft-provenance.md`; that follow-up supersedes the historical human-label, page-merge and embedded-path descriptions below. Current QA is `.qa_logs/2026-11-09T22_30_00_combined_validation_request.md`.
+
+Supplement: the owner subsequently requested manual approval-channel closure. Current candidate disables page/default-human approval and reserves a closed classifier stub; see `.qa_logs/2026-11-09T21_41_00_approval_validation_request.md`. Statements below describing unchanged human approval are historical to 767f3f0, superseded for that channel only. Merge, COMMENT and external formal-review recognition retain their existing semantics.
+
 The owner selected Cindy workflow for this candidate, replacing the missing legacy rule/sender requirement only within this scope. See the Template E and applicability decision in `.execution_logs/2026-11-09T21_20_00_executor_applicability.md`.
 
 ## Behavior

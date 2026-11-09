@@ -46,3 +46,11 @@ Independent archive tests:7 installation-scope and32 existing App/source/ledger 
 Original Python5f4af25addb5e7f802a5023798f7e65f0ce42d5b updates candidate-only pin/default/example to4c306c3d94341ff2e8d43ab0212e7cf996d6faf0cff54814c57c22e4c6838813. Source/test/doc/example subset is byte-identical. Independent pin/scope suite8/8 passed. Original full216=198pass17skip1baselinefail; lint unavailable. Production remains158/c768 and fail-closed.
 
 Plugin PR#4 reviewed implementation20ef482 is followed by1d116275bce4d34024887a79ded617410b615f50, changing tests/documentation only; bundle hash remains4c306. This mapping does not automatically extend QQ approval to a new pair. ReviewInbox's new joint QA is prepared, pending its existing peer-response gate; no separate review channel or installation is started by this archive update.
+
+## Remaining merge channel (disabled)
+
+The browser approve/merge routes are blocked, but try_auto_merge -> github.merge remains an upstream programmatic path gated by policy.auto_merge. Its default is False and it uses the configured human gh login, not the ReviewInbox App. Keep it disabled. This candidate does not authorize enabling it or treat page guards as removal of every merge-capable function.
+
+## Lint and CI follow-up
+
+Ruff0.14.4 is now run and six mechanical lint issues were corrected without changing review/authorization behavior. Windows/Linux CI runs pinned Ruff and the complete unittest suite; no known failing test is skipped or converted into success. Original run logs stay outside the repository. The previously reproduced SkillTest failure remains a baseline blocker/disposition item, not a lint waiver.

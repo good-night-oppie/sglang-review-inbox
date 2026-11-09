@@ -739,7 +739,7 @@ class Pipeline:
             key, title=snap["title"], author=(snap.get("author") or {}).get("login", ""),
             url=snap["url"], state=snap["state"], draft=snap["isDraft"], head_sha=head,
             base_ref=snap["baseRefName"], additions=snap["additions"], deletions=snap["deletions"],
-            changed_files=snap["changedFiles"], labels=[l["name"] for l in snap.get("labels") or []],
+            changed_files=snap["changedFiles"], labels=[label["name"] for label in snap.get("labels") or []],
             mergeable=snap.get("mergeable") or "", review_decision=snap.get("reviewDecision") or "",
             meta={"merge_state": snap.get("mergeStateStatus"), "created_at": snap.get("createdAt"),
                   "updated_at": snap.get("updatedAt"),

@@ -40,3 +40,9 @@ ReviewInbox reports QQ code approval for parent2b7f039 only; this added follow-u
 Original Python candidate91520972b7e5df226248beb7db05a7caae8557b3 is archived as source/tests/docs only; local run logs are excluded. Paired plugin candidate: oppie-github PR#4,20ef482ad4af504b19f237aba82c3f21ab5aa810, bundleSHA2564c306c3d94341ff2e8d43ab0212e7cf996d6faf0cff54814c57c22e4c6838813. Plugin live identity independently verified six installation repositories and a narrowed two-repository execution token; Python checks both exact sets and existing permission levels. These are two candidates requiring joint QQ C-class review, not an installed pair.
 
 Independent archive tests:7 installation-scope and32 existing App/source/ledger pass. Original full215=197pass/17skip/1unchanged baseline SkillTest failure; lint unavailable. Python still pins old installed1.2.1 c768 hash intentionally. Runtime identity remains fail-closed after installation scope expanded; historical158上线approval does not establish current health. Do not edit production hash/config or restart before reviewed installation and actual entry/hash/identity acceptance.
+
+## Candidate pin update (not installed)
+
+Original Python5f4af25addb5e7f802a5023798f7e65f0ce42d5b updates candidate-only pin/default/example to4c306c3d94341ff2e8d43ab0212e7cf996d6faf0cff54814c57c22e4c6838813. Source/test/doc/example subset is byte-identical. Independent pin/scope suite8/8 passed. Original full216=198pass17skip1baselinefail; lint unavailable. Production remains158/c768 and fail-closed.
+
+Plugin PR#4 reviewed implementation20ef482 is followed by1d116275bce4d34024887a79ded617410b615f50, changing tests/documentation only; bundle hash remains4c306. This mapping does not automatically extend QQ approval to a new pair. ReviewInbox's new joint QA is prepared, pending its existing peer-response gate; no separate review channel or installation is started by this archive update.

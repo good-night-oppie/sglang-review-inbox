@@ -1,5 +1,7 @@
 # ReviewInbox joint scope contract — candidate, not deployed
 
+Pairing update: the later candidate pairs source plugin PR#4 head20ef482a / version1.2.4 with bundle SHA4c306c3d...38813, verified by source-candidate identity only. Candidate code/default/example pins now use that artifact; production remains 1.2.1/c768 and blocked. The old-pin paragraphs below describe scope-only parent9152097 and are superseded for the paired candidate by the joint QA request `2026-11-09T22_45_00_joint_scope_pin_validation_request.md`.
+
 The owner-authorized installation matrix is now six repositories. That is not publication authorization for six repositories. The deployed Inbox configuration remains MontClip and MontClip-Cindy only. This independent candidate starts at deployed 158cc6a2 and changes only Python identity validation, its fixtures, focused tests and review evidence.
 
 ## Expected identity result

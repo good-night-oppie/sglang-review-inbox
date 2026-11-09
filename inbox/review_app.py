@@ -1,4 +1,4 @@
-"""Pinned 1.2.1 stdin transport for this Inbox's COMMENT publisher.
+"""Paired 1.2.4 candidate transport; installation and runtime acceptance pending.
 
 No credentials, environment changes or shared-gh fallback. Future App capabilities
 are outside this boundary; this candidate exposes only review COMMENT and reads.
@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 
-SHA256 = "c7681c8930c7c6aab68b91518513b1032cf9c43d73e30ba64d4d48beb6aa044c"
+SHA256 = "4c306c3d94341ff2e8d43ab0212e7cf996d6faf0cff54814c57c22e4c6838813"
 APP_ID = 5687106
 INSTALLATION_ID = 180305629
 SLUG = "reviewinboxoppiexyz"
@@ -168,8 +168,8 @@ class Client:
         if snap.get("draft"):
             if not draft_request:
                 raise AppError("APP_DRAFT_EXPLICIT_REQUEST_REQUIRED")
-            # 1.2.1 rejects this field; keep that fail-closed behavior until a
-            # reviewed replacement bundle/version/hash is explicitly accepted.
+            # The service-verified source is internal to the paired adapter;
+            # installing/accepting this candidate remains a separate C-tier step.
             payload["draft_request"] = draft_request
         item = self.request(repo, "submit_review", payload)
         if not self._match(item, head, marker):

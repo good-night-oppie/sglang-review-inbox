@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from inbox import review_app  # noqa: E402
+from inbox import config, review_app  # noqa: E402
 
 REPO = "good-night-oppie/MontClip"
 MATRIX = {
@@ -27,6 +27,11 @@ def identity():
 
 
 class InstallationScopeTest(unittest.TestCase):
+    def test_paired_candidate_bundle_pin_is_consistent(self):
+        expected = "4c306c3d94341ff2e8d43ab0212e7cf996d6faf0cff54814c57c22e4c6838813"
+        self.assertEqual(review_app.SHA256, expected)
+        self.assertEqual(config.DEFAULTS["review_app"]["sha256"], expected)
+
     def assert_refused(self, result):
         with mock.patch.object(review_app.Client, "request", return_value=result):
             with self.assertRaises(review_app.AppError):

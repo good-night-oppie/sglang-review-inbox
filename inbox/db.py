@@ -51,6 +51,7 @@ JSON_COLUMNS = ("labels", "meta", "triage", "review", "ci", "decision", "request
 # pipeline) | resolved (its PRs are merged/closed) | dismissed (you marked it
 # handled). conv: channel | dm.
 MENTION_COLUMNS = {
+    "user_id": "TEXT DEFAULT ''",
     "kind": "TEXT DEFAULT ''", "team_id": "TEXT DEFAULT ''", "channel_id": "TEXT DEFAULT ''",
     "thread_ts": "TEXT DEFAULT ''", "conv": "TEXT DEFAULT 'channel'", "status": "TEXT DEFAULT 'pending'",
     "status_note": "TEXT DEFAULT ''", "checked_at": "REAL DEFAULT 0", "count": "INTEGER DEFAULT 1",
@@ -176,6 +177,7 @@ class Store:
     # ---- mentions -------------------------------------------------------
     def _mention_row(self, mention):
         defaults = {"channel": "", "author": "", "permalink": "", "pr_keys": [], "kind": "",
+                    "user_id": "",
                     "team_id": "", "channel_id": "", "thread_ts": "", "conv": "channel",
                     "status": "pending", "status_note": "", "checked_at": 0, "count": 1}
         row = dict(defaults, **{k: v for k, v in mention.items() if k in MENTION_FIELDS})
@@ -213,6 +215,12 @@ class Store:
         with self.lock:
             self.conn.execute("UPDATE mentions SET status=?, status_note=?, checked_at=? WHERE id=?",
                               (status, note, time.time(), mention_id))
+            self.conn.commit()
+
+    def mark_review_ask(self, mention_id):
+        """Record the service's explicit-request classification, not a model claim."""
+        with self.lock:
+            self.conn.execute("UPDATE mentions SET kind='review' WHERE id=?", (mention_id,))
             self.conn.commit()
 
     def has_mention(self, mention_id):
@@ -288,7 +296,7 @@ class Store:
         return [dict(row, data=json.loads(row["data"])) for row in rows]
 
     # ---- action ledger --------------------------------------------------
-    def claim_action(self, key, head, event):
+    def claim_action(self, key, head, event, result=None):
         """Reserve an external write. Returns False when it already ran or is
         in flight; an interrupted 'running' action is left for a human, never
         retried blindly, because the remote write may have happened."""
@@ -299,10 +307,19 @@ class Store:
             if row is not None:
                 return False
             self.conn.execute(
-                "INSERT INTO actions VALUES (?, ?, ?, 'running', '{}', ?)",
-                (key, head, event, time.time()))
+                "INSERT INTO actions VALUES (?, ?, ?, 'running', ?, ?)",
+                (key, head, event, json.dumps(result or {}), time.time()))
             self.conn.commit()
             return True
+
+    def unresolved_action(self, key, head, event):
+        """Preserve persisted marker and claim when remote effects are uncertain."""
+        with self.lock:
+            updated = self.conn.execute(
+                "UPDATE actions SET phase='unresolved', ts=? WHERE pr_key=? AND head=? AND event=? "
+                "AND phase IN ('running', 'unresolved')", (time.time(), key, head, event)).rowcount
+            self.conn.commit()
+            return bool(updated)
 
     def finish_action(self, key, head, event, ok, result=None):
         with self.lock:
@@ -313,7 +330,7 @@ class Store:
             else:
                 # Known failure with no remote effect: release so it can be retried.
                 self.conn.execute(
-                    "DELETE FROM actions WHERE pr_key=? AND head=? AND event=?", (key, head, event))
+                    "DELETE FROM actions WHERE pr_key=? AND head=? AND event=? AND phase='running'", (key, head, event))
             self.conn.commit()
 
     def actions(self, key):

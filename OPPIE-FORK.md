@@ -12,3 +12,45 @@ This is a private, Git-history-preserving maintenance fork, not a GitHub-native 
 This source archive does not deploy, restart or alter the live Inbox. GG maintains source/submodule updates; ReviewInbox manages the instance and its isolated adapter candidate; QQ reviews changes before release. Parent montclip-rsi pins an exact commit and does not execute this submodule in the patrol loop.
 
 Validation: python -m unittest discover -s tests (offline). Current-head test evidence is recorded in the parent delivery. Future updates must preserve unknown-write ledger records and reconcile remote results before retrying; never fall back to a shared GitHub identity when App authentication fails.
+
+## COMMENT candidate source provenance
+
+The review/app-comment branch imports only inbox/, tests/ and docs/ changes from original candidate 767f3f02412a302e08eb5e3b6f2471d52b6673b5 against25fc4d9d9dca25a5756ea00f0bb3a237fc7e5c28. Source/test trees are checked byte-for-byte. Local .execution_logs and .qa_logs are not published; this does not modify the original candidate or its ongoing work.
+
+Original reported validation:20 focused passed; full190=172passed/17existing skips/1baseline SkillTest failure. Publication checkout independently reran20focused successfully. Ruff was unavailable in original environment. Real verification was identity-only; no GitHub comments were sent.
+
+Deployment holds: fixed installed1.2.1 Windows Skill path/hash is machine-specific; plugin Draft COMMENT fix is separate oppie-github#1, not installed; managed service integration is separate oppie-github#2 and preview-only. Formal QQ approval remains pending. No new approval-gate changes from the original working tree are included.
+
+## Combined candidate update
+
+Original candidate 2b7f039082a1949ff0728ce3f51369deaaea5be1 supersedes767f3f0 for review. Source/test/docs/config.example.json/server.py/web trees match that exact candidate; execution/QA logs remain excluded. User-specific installation paths are now explicit private runtime settings, not source defaults.
+
+This update blocks page-token approve AND merge before external requests, labels human-confirmed COMMENT findings separately, and derives optional Draft provenance from persisted service-owned sources only. It does not enable future approval automation. The existing installed1.2.1 hash remains pinned, so actual Draft posting still fails closed pending the reviewed plugin update.
+
+Independent publication validation:32 App/source tests and6 page gate tests passed. Original full result208=190pass/17skip/1unchanged baseline failure; lint unavailable. No deployment or real comment writes. QQ approval is still pending and the plugin parent pins remain unchanged.
+
+## Portable-path follow-up
+
+Source candidate158cc6a254018fb4e31814c668cd783114d1efce adds only ecosystem.config.js local path resolution/explicit environment overrides and a historical document path cleanup. Source trees match exactly; local validation logs remain excluded. Node syntax and diff checks were independently rerun. No Python behavior changed, so the full suite was not repeated.
+
+ReviewInbox reports QQ code approval for parent2b7f039 only; this added follow-up and the separate private runtime configuration readback still require QQ verification. Runtime configuration was not copied into this repository. The running production code has not been switched by this archive task. Historical commits retain historical local paths; history was not rewritten.
+
+## Installation/execution scope pairing
+
+Original Python candidate91520972b7e5df226248beb7db05a7caae8557b3 is archived as source/tests/docs only; local run logs are excluded. Paired plugin candidate: oppie-github PR#4,20ef482ad4af504b19f237aba82c3f21ab5aa810, bundleSHA2564c306c3d94341ff2e8d43ab0212e7cf996d6faf0cff54814c57c22e4c6838813. Plugin live identity independently verified six installation repositories and a narrowed two-repository execution token; Python checks both exact sets and existing permission levels. These are two candidates requiring joint QQ C-class review, not an installed pair.
+
+Independent archive tests:7 installation-scope and32 existing App/source/ledger pass. Original full215=197pass/17skip/1unchanged baseline SkillTest failure; lint unavailable. Python still pins old installed1.2.1 c768 hash intentionally. Runtime identity remains fail-closed after installation scope expanded; historical158上线approval does not establish current health. Do not edit production hash/config or restart before reviewed installation and actual entry/hash/identity acceptance.
+
+## Candidate pin update (not installed)
+
+Original Python5f4af25addb5e7f802a5023798f7e65f0ce42d5b updates candidate-only pin/default/example to4c306c3d94341ff2e8d43ab0212e7cf996d6faf0cff54814c57c22e4c6838813. Source/test/doc/example subset is byte-identical. Independent pin/scope suite8/8 passed. Original full216=198pass17skip1baselinefail; lint unavailable. Production remains158/c768 and fail-closed.
+
+Plugin PR#4 reviewed implementation20ef482 is followed by1d116275bce4d34024887a79ded617410b615f50, changing tests/documentation only; bundle hash remains4c306. This mapping does not automatically extend QQ approval to a new pair. ReviewInbox's new joint QA is prepared, pending its existing peer-response gate; no separate review channel or installation is started by this archive update.
+
+## Remaining merge channel (disabled)
+
+The browser approve/merge routes are blocked, but try_auto_merge -> github.merge remains an upstream programmatic path gated by policy.auto_merge. Its default is False and it uses the configured human gh login, not the ReviewInbox App. Keep it disabled. This candidate does not authorize enabling it or treat page guards as removal of every merge-capable function.
+
+## Lint and CI follow-up
+
+Ruff0.14.4 is now run and six mechanical lint issues were corrected without changing review/authorization behavior. Windows/Linux CI runs pinned Ruff and the complete unittest suite; no known failing test is skipped or converted into success. Original run logs stay outside the repository. The previously reproduced SkillTest failure remains a baseline blocker/disposition item, not a lint waiver.

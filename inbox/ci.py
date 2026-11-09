@@ -85,7 +85,7 @@ def rule_triage(failures):
         elif github.log_missing(log):
             verdict, evidence = "unclassified", ""
         elif match := INFRA_LOG.search(log):
-            line = next((l for l in log.splitlines() if match.group(0) in l), match.group(0))
+            line = next((entry for entry in log.splitlines() if match.group(0) in entry), match.group(0))
             verdict, evidence = "infra", line.strip()[-200:]
         else:
             continue

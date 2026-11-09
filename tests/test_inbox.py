@@ -14,7 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from inbox import agent, ci, config as config_module, fixer, github, pipeline as pipeline_module  # noqa: E402
+from inbox import agent, ci, config as config_module, fixer, github  # noqa: E402
 from inbox.db import Store  # noqa: E402
 from inbox.pipeline import Pipeline, anchored, evidence_line, finding_comment, new_side_ranges, plain  # noqa: E402
 from inbox.skill import SkillSync, SkillSyncError, missing_skill_steps  # noqa: E402
@@ -659,6 +659,8 @@ class PipelineTest(unittest.TestCase):
             mock.patch.object(github, "approved_heads", side_effect=lambda *a: self.approved),
             mock.patch.object(github, "comment", side_effect=self.fake_comment),
             mock.patch.object(github, "submit_review", side_effect=self.fake_review),
+            mock.patch.object(github.review_app.Client, "submit", side_effect=lambda r, n, h, b, c, m:
+                              self.fake_review(r, n, h, "COMMENT", b, c)),
             mock.patch.object(agent, "Workspace", FakeWorkspace),
             mock.patch.object(agent, "review", side_effect=self.fake_agent_review),
             mock.patch.object(agent, "verify", side_effect=lambda c, w, f: (
@@ -882,6 +884,8 @@ class AutonomousTest(unittest.TestCase):
             mock.patch.object(github, "approved_heads", side_effect=lambda *a: self.approved),
             mock.patch.object(github, "comment", side_effect=lambda r, n, body: self.writes.append(("comment", body)) or "u"),
             mock.patch.object(github, "submit_review", side_effect=self.fake_review),
+            mock.patch.object(github.review_app.Client, "submit", side_effect=lambda r, n, h, b, c, m:
+                              self.fake_review(r, n, h, "COMMENT", b, c)),
             mock.patch.object(github, "merge", side_effect=lambda *a: self.writes.append(("merge",))),
             mock.patch.object(github, "rerun_test_status", side_effect=lambda *a: self.rerun),
             mock.patch.object(agent, "Workspace", FakeWorkspace),
@@ -1507,7 +1511,7 @@ class AutonomousTest(unittest.TestCase):
         calls = []
         with mock.patch.object(agent, "discuss", side_effect=lambda *a: calls.append(a) or (answer, {})):
             self.advance()
-            card = self.advance()
+            self.advance()
             self.advance()
         self.assertEqual(len(calls), 1)
         self.assertEqual([w for w in self.writes if w[0] == "reply"], [])  # you are never answered
@@ -2182,7 +2186,8 @@ class SlackInboxTest(unittest.TestCase):
     def test_mention_about_a_merged_pr_is_resolved(self):
         self.pipe.poll_slack(self.config["sources"]["slack"])
         self.pipe.poll_slack_inbox(self.config["sources"]["slack_inbox"])
-        status = lambda: {m["author"]: m["status"] for m in self.store.recent_mentions(since=0)}["gina"]
+        def status():
+            return {m["author"]: m["status"] for m in self.store.recent_mentions(since=0)}["gina"]
         self.assertEqual(status(), "pending")  # PR still open: you still owe a reply
         self.pr_state = "MERGED"
         self.pipe._pr_states.clear()

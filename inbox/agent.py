@@ -374,7 +374,8 @@ def run_agent(config, prompt, schema, workspace, label, profile=None, skill_dir=
         # Windows: codex's read-only sandbox only reads under the working directory (--add-dir is not
         # honoured for reads), so run from data_dir, which holds runs/, worktrees/ and the skill copy.
         root = str(Path(config["data_dir"]).expanduser())
-        i = cmd.index("-C"); cmd[i + 1] = root
+        i = cmd.index("-C")
+        cmd[i + 1] = root
     started = time.time()
     account = ""
     if agent["runner"] == "codex":

@@ -10,6 +10,10 @@ from pathlib import Path
 PLACEHOLDER = re.compile(r"<[A-Z][A-Z0-9_]*>")
 
 DEFAULTS = {
+    # Deployment-specific verified paths. Empty values fail closed for App calls;
+    # do not commit local usernames/installation paths or credentials.
+    "review_app": {"entry": "", "real_entry": "", "node_executable": "",
+                   "sha256": "4c306c3d94341ff2e8d43ab0212e7cf996d6faf0cff54814c57c22e4c6838813"},
     # The GitHub account the agent acts as. Empty = whoever `gh` is logged in as.
     "github_login": "",
     # Only PRs in these repos are ever reviewed or touched.

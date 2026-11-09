@@ -5,7 +5,8 @@
 
 Binds to 127.0.0.1 only. Every POST needs the per-process token embedded in
 the page, and the Host header must be local, so other web pages cannot
-drive approvals through your browser. Optional server.tailnet {host, logins}
+drive actions through your browser. Page tokens never authorize formal approval.
+Optional server.tailnet {host, logins}
 also admits requests relayed by `tailscale serve` for the listed tailnet users."""
 
 import argparse
@@ -23,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 
 from inbox import agent, config as config_module  # noqa: E402
 from inbox.db import Store, pr_key  # noqa: E402
-from inbox.github import find_pr_refs  # noqa: E402
+from inbox.github import ApprovalDisabled, MergeDisabled, find_pr_refs  # noqa: E402
 from inbox.pipeline import Pipeline, finding_comment  # noqa: E402
 from inbox.slack import Slack, SlackError  # noqa: E402
 
@@ -160,6 +161,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
             result = self.route(urlparse(self.path).path, body)
+        except (ApprovalDisabled, MergeDisabled) as exc:
+            return self._send(HTTPStatus.FORBIDDEN, {"error": str(exc)})
         except (ValueError, KeyError) as exc:
             self.log_failure(body, exc)
             return self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -251,20 +254,24 @@ class Handler(BaseHTTPRequestHandler):
         return {"team": client.team, "team_id": client.team_id}
 
     def action(self, store, pipeline, body):
+        if body.get("action") == "approve":
+            # CSRF token possession is not an attested reviewer identity. No
+            # request fields, page mode or role claim can opt into this action.
+            raise ApprovalDisabled("FORMAL_APPROVAL_DISABLED")
+        if body.get("action") == "merge":
+            raise MergeDisabled("FORMAL_MERGE_DISABLED")
         key, action = body["key"], body["action"]
         card = store.get_pr(key)
         if card is None:
             raise ValueError("unknown PR")
         decision = dict(card["decision"], refresh=True)
-        if action == "approve":
-            result = pipeline.approve(key, body.get("note", ""))
-        elif action == "merge":
-            result = pipeline.merge(key)
-        elif action == "publish_findings":
-            result = pipeline.publish_findings(key, by="human")
+        if action == "publish_findings":
+            result = pipeline.publish_findings(key, by="human",
+                draft_request=pipeline.record_draft_request(key, action))
         elif action == "request_changes":
             # Already posted (by you or the agent) is fine: this click is about whose turn it is.
-            result = pipeline.findings_review(key, card["head_sha"]) or pipeline.publish_findings(key, by="human")
+            result = pipeline.findings_review(key, card["head_sha"]) or pipeline.publish_findings(key, by="human",
+                draft_request=pipeline.record_draft_request(key, action))
             decision["waiting_author_head"] = card["head_sha"]  # the pipeline keeps it there until a new push
             store.set_stage(key, "needs_author", "you confirmed the findings and sent them to the author")
         elif action == "run_suggestion":

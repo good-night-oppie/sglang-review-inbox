@@ -772,10 +772,7 @@ function renderList() {
 }
 function cardRow(c) {
   const blocking = c.findings.filter(f => ["blocker", "major"].includes(f.severity) && f.risk !== false).length;
-  const quick = (c.merge_ready || (c.stage === "ready" && c.ready_kind === "merge")) && !c.review_stale
-    ? el("button", {class: "primary", onclick: e => { e.stopPropagation(); doAction(c.key, "merge"); }}, t("merge"))
-    : c.stage === "ready" && c.ready_kind === "approve" && !c.review_stale
-    ? el("button", {class: "primary", onclick: e => { e.stopPropagation(); doAction(c.key, "approve"); }}, t("approve")) : null;
+  const quick = null; // Formal approval and merge queue entry belong to QQ.
   const rail = isMerged(c) ? (c.merged_by_agent ? "var(--agent)" : "var(--ok)") : RAIL[c.stage] || "var(--line-strong)";
   return el("div", {class: "row", style: `--rail:${rail}`, onclick: () => openDrawer(c.key)},
     el("div", {class: "main"},
@@ -848,9 +845,10 @@ async function slackItem(id, action) {
 }
 
 async function doAction(key, action, extra = {}) {
+  if (action === "approve") { toast("FORMAL_APPROVAL_DISABLED"); return; }
+  if (action === "merge") { toast("FORMAL_MERGE_DISABLED"); return; }
   const ask = t("confirm")[action];
-  const preconfirmed = action === "approve" && extra.note !== undefined;
-  if (ask && !preconfirmed && !confirm(ask)) return;
+  if (ask && !confirm(ask)) return;
   try { await post("/api/action", {key, action, ...extra}); toast(t("done")); }
   catch (e) { toast(t("failed", {x: e.message})); }
   refresh();
@@ -888,13 +886,6 @@ async function openDrawer(key, quiet) {
         el("div", {class: "actions"}, link(c.url, t("openGithub")), el("button", {class: "ghost", onclick: closeDrawer}, t("close")))),
       el("h1", {}, c.title || c.key),
       el("div", {class: "actions"},
-        c.stage === "approved" || (c.stage === "ready" && (c.decision || {}).ready_kind === "merge")
-          ? el("button", {class: "primary", disabled: stale || (c.stage === "approved" && !(c.decision || {}).merge_ready),
-              onclick: () => doAction(c.key, "merge")}, t("merge")) : null,
-        el("button", {class: c.stage === "approved" ? "" : "primary", disabled: !review.verdict || stale, onclick: () => {
-          const note = prompt(t("approvePrompt"), review.approve_note || "LGTM.");
-          if (note !== null) doAction(c.key, "approve", {note});
-        }}, t("approve")),
         // nothing to post when the verifier kept no finding; a stale review must be redone first;
         // findings are posted once per head, after that only the hand-off to the author remains
         findings.length && posted ? link(posted.url, t("posted")) : null,

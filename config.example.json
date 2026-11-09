@@ -1,4 +1,10 @@
 {
+  "review_app": {
+    "entry": "",
+    "real_entry": "",
+    "node_executable": "",
+    "sha256": "4c306c3d94341ff2e8d43ab0212e7cf996d6faf0cff54814c57c22e4c6838813"
+  },
   "github_login": "<YOUR_GITHUB_LOGIN>",
   "repos": [
     "sgl-project/sglang"

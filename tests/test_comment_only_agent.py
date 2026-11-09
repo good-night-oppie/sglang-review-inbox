@@ -18,20 +18,19 @@ HEAD = "a" * 40
 class AgentReviewPayloadTest(unittest.TestCase):
     def test_notice_is_the_required_literal_not_a_configurable_model_prompt(self):
         self.assertEqual(github.AGENT_REVIEW_NOTICE,
-                         "[GoodNightOppie Review Agent] 自动审查，仅供参考，不是 QQ 的批准")
+                         "[ReviewInboxOppieXYZ Review Agent] 自动审查，仅供参考，不是 QQ 的批准")
 
     def test_model_requests_cannot_choose_the_github_event(self):
         for verdict in ("approve", "APPROVE", "REQUEST_CHANGES", "lgtm", "changes_needed", "needs_human"):
-            with self.subTest(verdict=verdict), mock.patch.object(github, "gh_json", return_value={"id": 7}) as send:
+            with self.subTest(verdict=verdict), mock.patch.object(github.review_app.Client, "submit", return_value={"id": 7}) as send:
                 github.submit_agent_review("example/repo", 1, HEAD, verdict,
                                            [{"path": "fixture.py", "line": 1, "body": verdict}])
-                payload = json.loads(send.call_args.kwargs["input_text"])
-                self.assertEqual(payload["event"], "COMMENT")
-                self.assertEqual(payload["commit_id"], HEAD)
-                for body in (payload["body"], payload["comments"][0]["body"]):
+                args = send.call_args.args
+                self.assertEqual(args[2], HEAD)
+                for body in (args[3], args[4][0]["body"]):
                     self.assertEqual(body.splitlines()[0], github.AGENT_REVIEW_NOTICE)
                     self.assertIn(HEAD, body)
-                self.assertTrue(send.call_args.kwargs["write"])
+                self.assertTrue(args[5].startswith("<!-- reviewinbox:"))
 
     def test_missing_or_short_head_is_rejected_before_any_write(self):
         for head in ("", "a" * 8, "not-a-sha", None):
@@ -76,8 +75,13 @@ class AutomaticReviewPipelineTest(unittest.TestCase):
             self.payloads.append(json.loads(kwargs["input_text"]))
             return {"id": len(self.payloads), "html_url": "https://github.com/example/repo/pull/1#review"}
 
+        def app_send(repo, number, head, body, comments, marker):
+            self.payloads.append({"commit_id": head, "event": "COMMENT", "body": body, "comments": list(comments)})
+            return {"id": len(self.payloads), "url": "https://github.com/example/repo/pull/1#review", "marker": marker}
+
         for patch in (
             mock.patch.object(github, "gh_json", side_effect=send),
+            mock.patch.object(github.review_app.Client, "submit", side_effect=app_send),
             mock.patch.object(github, "fetch_pr", side_effect=lambda *args: self.snap),
             mock.patch.object(github, "approved_heads", return_value=set()),
             mock.patch("inbox.pipeline.triage", return_value={"tier": "T1", "gates": []}),
@@ -171,10 +175,10 @@ class AutomaticReviewPipelineTest(unittest.TestCase):
         self.assert_advisory_only()
         self.assertEqual(self.payloads[0]["comments"][0]["body"].splitlines()[0], github.AGENT_REVIEW_NOTICE)
 
-    def test_explicit_human_button_is_separate_from_model_output(self):
-        self.pipe.approve(self.key, note="QQ explicit manual review of this head", by="human")
-        self.assertEqual(self.payloads[0]["event"], "APPROVE")
-        self.assertEqual(self.payloads[0]["commit_id"], HEAD)
+    def test_explicit_human_button_cannot_become_a_formal_approval(self):
+        with self.assertRaises(PermissionError):
+            self.pipe.approve(self.key, note="QQ explicit manual review of this head", by="human")
+        self.assertEqual(self.payloads, [])
 
 
 if __name__ == "__main__":

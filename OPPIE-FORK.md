@@ -28,3 +28,9 @@ Original candidate 2b7f039082a1949ff0728ce3f51369deaaea5be1 supersedes767f3f0 fo
 This update blocks page-token approve AND merge before external requests, labels human-confirmed COMMENT findings separately, and derives optional Draft provenance from persisted service-owned sources only. It does not enable future approval automation. The existing installed1.2.1 hash remains pinned, so actual Draft posting still fails closed pending the reviewed plugin update.
 
 Independent publication validation:32 App/source tests and6 page gate tests passed. Original full result208=190pass/17skip/1unchanged baseline failure; lint unavailable. No deployment or real comment writes. QQ approval is still pending and the plugin parent pins remain unchanged.
+
+## Portable-path follow-up
+
+Source candidate158cc6a254018fb4e31814c668cd783114d1efce adds only ecosystem.config.js local path resolution/explicit environment overrides and a historical document path cleanup. Source trees match exactly; local validation logs remain excluded. Node syntax and diff checks were independently rerun. No Python behavior changed, so the full suite was not repeated.
+
+ReviewInbox reports QQ code approval for parent2b7f039 only; this added follow-up and the separate private runtime configuration readback still require QQ verification. Runtime configuration was not copied into this repository. The running production code has not been switched by this archive task. Historical commits retain historical local paths; history was not rewritten.

@@ -68,5 +68,19 @@ class MalformedInputTests(unittest.TestCase):
         self.assertEqual(review_verdict_label(R("minor"), ["oops"]), DISCUSS)
 
 
+class SharedRiskRuleTests(unittest.TestCase):
+    def test_testing_category_major_without_kind_is_not_a_blocker(self):
+        item = {"severity": "major", "verify": "confirmed", "category": "tests"}
+        self.assertEqual(review_verdict_label(R("lgtm"), [item]), PASS)
+
+    def test_evidence_kind_major_is_not_a_blocker(self):
+        item = {"severity": "major", "verify": "confirmed", "kind": "evidence", "category": "correctness"}
+        self.assertEqual(review_verdict_label(R("lgtm"), [item]), PASS)
+
+    def test_bug_kind_major_is_a_blocker(self):
+        item = {"severity": "major", "verify": "confirmed", "kind": "bug"}
+        self.assertEqual(review_verdict_label(R("lgtm"), [item]), CHANGES)
+
+
 if __name__ == "__main__":
     unittest.main()

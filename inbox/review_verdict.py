@@ -26,9 +26,25 @@ is a question for a human, not a pass.
 """
 from __future__ import annotations
 
+import re
+
 VERDICTS = ("lgtm", "minor", "changes_needed", "needs_human")
 SEVERITIES = ("blocker", "major", "minor", "nit")
 VERIFY_STATES = ("confirmed", "plausible", "rejected")
+
+EVIDENCE_CATEGORY = re.compile(r"^(tests?|validation|hardware-validation)$|^tests?[/-]|evidence|benchmark|claim", re.I)
+
+
+def is_risk(finding):
+    """One shared definition of a concrete defect (agent.is_risk delegates here).
+
+    A finding with an explicit kind is a risk only when it is a bug; without a
+    kind, test/evidence/benchmark categories never block.
+    """
+    kind = finding.get("kind")
+    if kind:
+        return kind == "bug"
+    return not EVIDENCE_CATEGORY.search(finding.get("category") or "")
 
 PASS = "通过"
 CHANGES = "要改"
@@ -36,12 +52,8 @@ DISCUSS = "需要讨论"
 
 
 def _blocking(finding):
-    """True for blocker/major defects. Evidence requests never block."""
-    if finding.get("severity") not in ("blocker", "major"):
-        return False
-    if finding.get("kind") == "evidence":
-        return False
-    return True
+    """True for blocker/major defects under the shared risk rule."""
+    return finding.get("severity") in ("blocker", "major") and is_risk(finding)
 
 
 def review_verdict_label(review, wanted):

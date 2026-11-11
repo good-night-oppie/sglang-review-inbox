@@ -336,8 +336,31 @@ def agent_review_body(commit_id, body, *, human_confirmed=False, lead=None):
     if not re.fullmatch(r"[0-9a-f]{40}", commit_id or ""):
         raise ValueError("automatic review requires a full head SHA")
     notice = HUMAN_FINDINGS_NOTICE if human_confirmed else AGENT_REVIEW_NOTICE
-    parts = ([lead] if lead else []) + [notice, f"Head: `{commit_id}`", body]
+    parts = ([_clean_lead(lead)] if lead else []) + [notice, f"Head: `{commit_id}`", body]
     return "\n\n".join(parts)
+
+
+def _clean_lead(lead):
+    """Trim the lead and keep the mention/verdict order honest.
+
+    With a mention, the first line must be exactly one @<Name>OppieXYZ mention
+    and the Chinese verdict must be the next line. Without a mention the lead is
+    a single 结论： line. Anything else is refused before it reaches GitHub.
+    """
+    text = str(lead or "").strip()
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        raise ValueError("lead must not be empty")
+    first = lines[0]
+    if first.startswith("@"):
+        if first.count("@") != 1 or not re.fullmatch(r"@[A-Za-z][A-Za-z0-9]*OppieXYZ(?:[ \t]+\S.*)?", first):
+            raise ValueError("lead mention must be a single @<Name>OppieXYZ with the request on the same line")
+        if len(lines) < 2 or not lines[1].startswith("结论："):
+            raise ValueError("a mention lead needs 结论：… on the next line")
+        return "\n".join(lines[:2])
+    if len(lines) != 1 or not first.startswith("结论："):
+        raise ValueError("a lead without a mention must be a single 结论：… line")
+    return first
 
 
 def submit_agent_review(repo, number, commit_id, body, comments=(), *, marker=None,

@@ -2003,7 +2003,8 @@ class Pipeline:
                            for a in self.store.actions(key))
         review = card["review"] or {}
         body = plain(note or review.get("approve_note") or review.get("summary") or "No blocking findings.")
-        result = self.publish_app_comment(card, head, event, body)
+        label = review_verdict.review_verdict_label(review, review.get("findings") or [])
+        result = self.publish_app_comment(card, head, event, body, lead=f"结论：{label}")
         if not already_done:
             self.store.add_event(key, "agent_comment", f"automatic review comment for {head}", result)
         self.set_ready(card, "approve", "automatic review is advisory; waiting for QQ's formal approval")

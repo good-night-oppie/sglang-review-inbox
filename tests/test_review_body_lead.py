@@ -32,5 +32,23 @@ class AgentReviewBodyLeadTests(unittest.TestCase):
             github.agent_review_body("abc", "summary", lead="结论：通过")
 
 
+class LeadValidationTests(unittest.TestCase):
+    def test_two_mentions_on_the_first_line_are_refused(self):
+        with self.assertRaises(ValueError):
+            github.agent_review_body(HEAD, "body", lead="@AOppieXYZ @BOppieXYZ look" + chr(10) + "结论：通过")
+
+    def test_mention_without_a_verdict_line_is_refused(self):
+        with self.assertRaises(ValueError):
+            github.agent_review_body(HEAD, "body", lead="@AOppieXYZ look")
+
+    def test_verdict_only_lead_is_trimmed(self):
+        body = github.agent_review_body(HEAD, "body", lead="  结论：通过  ")
+        self.assertEqual([ln for ln in body.splitlines() if ln.strip()][0], "结论：通过")
+
+    def test_verdict_lead_with_extra_lines_is_refused(self):
+        with self.assertRaises(ValueError):
+            github.agent_review_body(HEAD, "body", lead="结论：通过" + chr(10) + "extra")
+
+
 if __name__ == "__main__":
     unittest.main()

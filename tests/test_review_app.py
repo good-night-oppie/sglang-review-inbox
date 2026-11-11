@@ -227,6 +227,13 @@ class AppLedgerTest(unittest.TestCase):
         self.snap.start()
         self.addCleanup(self.snap.stop)
 
+    def test_agent_comment_carries_chinese_verdict_line(self):
+        self.store.update_pr(self.key, head_sha=HEAD, review_head=HEAD,
+                             review={"verdict": "lgtm", "findings": []})
+        with mock.patch.object(github, "submit_agent_review", return_value={"id": 1, "url": "u"}) as submit:
+            self.pipe.publish_agent_review(self.key)
+        self.assertEqual(submit.call_args.kwargs["lead"], "结论：通过")
+
     def test_unknown_then_remote_exists_no_duplicate_even_after_reopen(self):
         unknown = github.GitHubWriteUnknown("ambiguous")
         with mock.patch.object(github, "submit_agent_review", side_effect=unknown) as submit:

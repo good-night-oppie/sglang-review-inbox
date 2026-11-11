@@ -14,7 +14,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
-from . import agent, ci, fixer, github
+from . import agent, ci, fixer, github, review_verdict
 from .config import is_live, slack_tokens
 from .db import ACTIVE_STAGES, pr_key
 from .skill import SkillSync, SkillSyncError
@@ -1935,12 +1935,14 @@ class Pipeline:
             body += "\n\nStill open from my last review:\n" + "\n".join(
                 f"- {plain(f['title'])} (`{f['path']}:{f['line']}`)" for f in again)
         source = self.draft_request_source(card, draft_request if by == "human" else None)
+        label = review_verdict.review_verdict_label(review, wanted)
         result = self.publish_app_comment(card, head, "review:findings", body, inline,
-                                          human_confirmed=by == "human", draft_request=source)
+                                          human_confirmed=by == "human", draft_request=source,
+                                          lead=f"结论：{label}")
         self.store.add_event(key, "action", f"published {len(wanted)} finding(s)", result)
         return result
 
-    def publish_app_comment(self, card, head, event, body, comments=(), *, human_confirmed=False, draft_request=None):
+    def publish_app_comment(self, card, head, event, body, comments=(), *, human_confirmed=False, draft_request=None, lead=None):
         """Single existing publisher, with crash-safe marker and read-only recovery."""
         key = card["key"]
         action = next((a for a in self.store.actions(key) if a["event"] == event and a["head"] == head), None)
@@ -1972,7 +1974,7 @@ class Pipeline:
             try:
                 options = {"draft_request": draft_request} if draft_request else {}
                 result = github.submit_agent_review(card["repo"], card["number"], head, body, comments,
-                    marker=marker, human_confirmed=human_confirmed, config=self.config, **options)
+                    marker=marker, human_confirmed=human_confirmed, config=self.config, lead=lead, **options)
             except github.GitHubWriteUnknown:
                 if not self.store.unresolved_action(key, head, event):
                     done = next((a for a in self.store.actions(key)

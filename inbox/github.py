@@ -326,23 +326,29 @@ AGENT_REVIEW_NOTICE = "[ReviewInboxOppieXYZ Review Agent] 自动审查，仅供�
 HUMAN_FINDINGS_NOTICE = "[ReviewInboxOppieXYZ] 人工在 Inbox 确认后发布的发现，不是 QQ 的批准"
 
 
-def agent_review_body(commit_id, body, *, human_confirmed=False):
-    """Label advisory output and bind it to one full commit, before model text."""
+def agent_review_body(commit_id, body, *, human_confirmed=False, lead=None):
+    """Label advisory output and bind it to one full commit, before model text.
+
+    `lead` carries the optional single author mention and the Chinese verdict
+    line. It sits before the advisory notice so a routing mention keeps the
+    first non-empty line and the verdict lands on the next one.
+    """
     if not re.fullmatch(r"[0-9a-f]{40}", commit_id or ""):
         raise ValueError("automatic review requires a full head SHA")
     notice = HUMAN_FINDINGS_NOTICE if human_confirmed else AGENT_REVIEW_NOTICE
-    return f"{notice}\n\nHead: `{commit_id}`\n\n{body}"
+    parts = ([lead] if lead else []) + [notice, f"Head: `{commit_id}`", body]
+    return "\n\n".join(parts)
 
 
 def submit_agent_review(repo, number, commit_id, body, comments=(), *, marker=None,
-                        human_confirmed=False, draft_request=None, config=None):
+                        human_confirmed=False, draft_request=None, config=None, lead=None):
     """Existing advisory writer; event and App identity are never model-selected."""
     inline = [dict(c, body=agent_review_body(commit_id, c.get("body", ""), human_confirmed=human_confirmed)) for c in comments]
     marker = marker or f"<!-- reviewinbox:{uuid.uuid4().hex} -->"
     try:
         options = {"draft_request": draft_request} if draft_request is not None else {}
         return review_app.Client((config or {}).get("review_app", {})).submit(
-            repo, number, commit_id, agent_review_body(commit_id, body, human_confirmed=human_confirmed), inline, marker, **options)
+            repo, number, commit_id, agent_review_body(commit_id, body, human_confirmed=human_confirmed, lead=lead), inline, marker, **options)
     except review_app.AppError as exc:
         error = GitHubWriteUnknown if exc.unknown else GitHubError
         raise error(str(exc)) from None

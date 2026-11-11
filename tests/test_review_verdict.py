@@ -11,7 +11,8 @@ def f(severity="major", verify="confirmed", kind="bug", **extra):
     return finding
 
 
-R = lambda verdict: {"verdict": verdict}
+def R(verdict):
+    return {"verdict": verdict}
 
 
 class DecisionTableTests(unittest.TestCase):

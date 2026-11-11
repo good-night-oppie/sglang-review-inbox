@@ -97,7 +97,10 @@ class AutomaticReviewPipelineTest(unittest.TestCase):
         self.assertTrue(self.payloads)
         self.assertEqual({p["event"] for p in self.payloads}, {"COMMENT"})
         self.assertTrue(all(p["commit_id"] == HEAD for p in self.payloads))
-        self.assertTrue(all(p["body"].splitlines()[0] == github.AGENT_REVIEW_NOTICE for p in self.payloads))
+        self.assertTrue(all(p["body"].splitlines()[0] == github.AGENT_REVIEW_NOTICE
+                        or p["body"].splitlines()[0].startswith("结论：")
+                        for p in self.payloads))
+        self.assertTrue(all(github.AGENT_REVIEW_NOTICE in p["body"] for p in self.payloads))
         card = self.store.get_pr(self.key)
         self.assertNotEqual(card["stage"], "approved")
         self.assertNotIn("approved_head", card["decision"])

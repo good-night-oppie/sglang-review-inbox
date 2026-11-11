@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import github
+from . import github, review_verdict
 from .skill import missing_skill_steps
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -574,15 +574,13 @@ def apply_verification(findings, verification):
 
 # Reviews written before findings carried `kind`: these categories ask for
 # proof (tests, benchmarks, validation), not a fix to a defect.
-EVIDENCE_CATEGORY = re.compile(r"^(tests?|validation|hardware-validation)$|^tests?[/-]|evidence|benchmark|claim", re.I)
+EVIDENCE_CATEGORY = review_verdict.EVIDENCE_CATEGORY
 
 
 def is_risk(finding):
     """Only a concrete defect blocks a PR; asking for more tests, measurements
-    or hardware validation never does."""
-    if finding.get("kind"):
-        return finding["kind"] == "bug"
-    return not EVIDENCE_CATEGORY.search(finding.get("category") or "")
+    or hardware validation never does. Defined once in review_verdict."""
+    return review_verdict.is_risk(finding)
 
 
 def effective_verdict(review_result, kept):

@@ -1394,7 +1394,8 @@ class AutonomousTest(unittest.TestCase):
         event, _, body, inline = self.writes[0]
         self.assertEqual((event, inline), ("COMMENT", []))  # the inline P1 is not repeated
         self.assertIn("Still open from my last review:\n- Prove the fused path runs (`a.py:3`)", body)
-        self.assertEqual(body.splitlines()[0], github.AGENT_REVIEW_NOTICE)
+        self.assertEqual(body.splitlines()[0], "结论：要改")
+        self.assertIn(github.AGENT_REVIEW_NOTICE, body)
         self.assertIn(HEAD, body)
         self.assertIn("One thing to fix before this can go in.", body)
 

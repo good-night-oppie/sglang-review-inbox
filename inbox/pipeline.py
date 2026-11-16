@@ -832,12 +832,9 @@ class Pipeline:
                       for i, f in enumerate(confirmed)]
             if self.try_fix(card, snap, "findings", issues):
                 return
+            # Dedup is per head: a COMMENT on an earlier head does not cover this one. When nothing
+            # is new, publish_findings posts a still-open COMMENT bound to this head instead.
             published = self.findings_review(key, head)
-            if not published and confirmed and all(f.get("raised_before") for f in confirmed) \
-                    and self.latest_findings_review(key):  # nothing new since the last posted review
-                self.store.set_stage(key, "needs_author", "blocking issues confirmed, already posted, "
-                                     "waiting for the author")
-                return
             if not published and is_live(self.config) and self.policy["auto_publish_findings"]:
                 published = self.publish_findings(key, by="agent")
             self.store.set_stage(key, "needs_author", "blocking issues confirmed" + (", posted on the PR, waiting for the author" if published else ""))
@@ -1033,9 +1030,11 @@ class Pipeline:
             self.store.update_pr(card["key"], decision=decision)
         return approved
 
-    def latest_findings_review(self, key):
-        done = [a for a in self.store.actions(key) if a["event"] == "review:findings" and a["phase"] == "done"]
-        return done[-1]["result"] if done else None
+    def earlier_findings_head(self, key, head):
+        """The most recent other head that got a findings COMMENT, or None."""
+        done = [a["head"] for a in self.store.actions(key)
+                if a["event"] == "review:findings" and a["phase"] == "done" and a["head"] != head]
+        return done[-1] if done else None
 
     def findings_review(self, key, head):
         done = [a for a in self.store.actions(key)
@@ -1931,7 +1930,13 @@ class Pipeline:
                 "A few things to fix before this can go in." if must else "A few small things, nothing blocking.")
         if loose:
             body += "\n\n" + "\n".join(loose)
-        if again:
+        since = self.earlier_findings_head(key, head)
+        if again and not new and since:
+            # Nothing new on this head: say so on this head, so the head is never left without a COMMENT.
+            body += (f"\n\nNo new findings on `{head}`. These were raised on `{since}` and are still present:\n"
+                     + "\n".join(f"- {plain(f['title'])} (`{f['path']}:{f['line']}`)" for f in again)
+                     + f"\n\n<!-- reviewinbox:still-open head={head} since={since} -->")
+        elif again:
             body += "\n\nStill open from my last review:\n" + "\n".join(
                 f"- {plain(f['title'])} (`{f['path']}:{f['line']}`)" for f in again)
         source = self.draft_request_source(card, draft_request if by == "human" else None)

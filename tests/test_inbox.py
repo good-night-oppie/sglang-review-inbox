@@ -1766,10 +1766,44 @@ class AutonomousTest(unittest.TestCase):
         self.assertTrue(card["review"]["findings"][0]["raised_before"])  # posted already: not posted again
         self.assertEqual(self.store.count_events("review", 0), 1)  # a carry-over is not a review run
         card = self.advance()
-        self.assertEqual(sum(w[0] == "COMMENT" for w in self.writes), 1)  # nothing new: no second review posted
+        # The new head is not covered by the old head's review: it gets its own still-open COMMENT.
+        self.assertEqual([w[1] for w in self.writes if w[0] == "COMMENT"], [HEAD, NEW_HEAD])
         self.assertEqual((card["stage"], card["stage_reason"]),
-                         ("needs_author", "blocking issues confirmed, already posted, waiting for the author"))
+                         ("needs_author", "blocking issues confirmed, posted on the PR, waiting for the author"))
         self.assertIn("only main was merged in", " ".join(e["message"] for e in self.store.events(self.key, 20)))
+
+    def carried_to_new_head(self):
+        """Head A got a findings COMMENT, the author pushed head B, nothing new was found."""
+        self.reviewed_then_pushed(published=True)
+        with mock.patch.object(FakeWorkspace, "diff_fingerprint", create=True, new=lambda ws: "fp-1"), \
+                mock.patch.object(agent, "review", side_effect=AssertionError("carried, not re-reviewed")):
+            card = self.advance()
+        self.assertEqual(card["review_head"], NEW_HEAD)
+        self.assertTrue(all(f["raised_before"] for f in card["review"]["findings"]))
+        return self.advance()
+
+    def test_old_head_comment_does_not_count_as_posted_on_new_head(self):
+        card = self.carried_to_new_head()
+        comments = [w for w in self.writes if w[0] == "COMMENT"]
+        self.assertEqual([w[1] for w in comments], [HEAD, NEW_HEAD])  # one COMMENT per head
+        self.assertNotIn("already posted", card["stage_reason"])
+        self.assertEqual((card["stage"], card["stage_reason"]),
+                         ("needs_author", "blocking issues confirmed, posted on the PR, waiting for the author"))
+        _, commit_id, body, inline = comments[1]
+        self.assertEqual((commit_id, inline), (NEW_HEAD, []))  # carried points are not repeated inline
+        self.assertIn(f"Head: `{NEW_HEAD}`", body)  # full current head
+        self.assertIn(f"<!-- reviewinbox:still-open head={NEW_HEAD} since={HEAD} -->", body)  # stable marker
+        self.assertIn(f"No new findings on `{NEW_HEAD}`. These were raised on `{HEAD}` and are still present:",
+                      body)
+        self.assertIn("- Empty batch crashes (`a.py:3`)", body)
+        self.assertTrue(self.pipe.findings_review(self.key, NEW_HEAD))  # recorded against the new head
+
+    def test_findings_already_posted_on_current_head_are_not_posted_again(self):
+        self.carried_to_new_head()
+        card = self.advance()
+        card = self.advance()
+        self.assertEqual([w[1] for w in self.writes if w[0] == "COMMENT"], [HEAD, NEW_HEAD])
+        self.assertEqual(card["stage"], "needs_author")
 
     def test_new_head_gets_a_follow_up_review_of_the_delta_only(self):
         self.reviewed_then_pushed(published=True)
